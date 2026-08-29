@@ -1708,25 +1708,20 @@ class WoaBot:
         gc.collect()
 
     def _show_sponsor_notice(self, hours=0):
-        """输出醒目赞助公告（GUI 终端自动渲染为金色加粗，跨平台兼容）。
-        hours=0 表示首次启动，>0 表示已运行时长。"""
+        """输出醒目公告（GUI 终端自动渲染为金色加粗，跨平台兼容）。"""
         W = 58  # 框内宽度（两个 ║ 之间的字符数）
         B = lambda s: f"║{s:<{W}}║"  # 左对齐自动补齐到 W 宽度
 
         self.log("")
         self.log(f"╔{'═' * W}╗")
         self.log(B(""))
-        self.log(B("  ⭐  WOA AutoBot — 永久免费开源项目  ⭐"))
+        self.log(B("  ⭐  WOA AutoBot — 永久免费开源项目"))
         self.log(B(""))
-        self.log(B("  若本脚本对您有帮助，欢迎自愿赞助支持维护与开发更新"))
-        self.log(B("  赞助方式：闲鱼搜索用户「MythZx」或主界面赞助窗口"))
-        self.log(B("  官方仓库：github.com/hjtr7mymht-dot/WOA_AutoBot"))
-        self.log(B("  QQ 反馈群：1067076460"))
+        self.log(B("  若本脚本对您有帮助，可以去 GitHub 给作者点一个 Star 哦~"))
         self.log(B(""))
-        if hours > 0:
-            self.log(B(f"  已连续运行 {hours} 小时，感谢您的信任与支持！"))
-        else:
-            self.log(B("  感谢您的使用，本工具将努力为您提供稳定服务！"))
+        self.log(B("  官方仓库：github.com/fengfeng-qwq/WOA-AutoBot-GPL3-base"))
+        self.log(B(""))
+        self.log(B("  感谢您的使用，本工具将努力为您提供稳定服务！"))
         self.log(B(""))
         self.log(f"╚{'═' * W}╝")
         self.log("")
@@ -1936,11 +1931,6 @@ class WoaBot:
                     self._stat_date = now_date
                 if self._is_module_enabled('lifecycle'):
                     now_ts = time.time()
-                    # 每小时醒目公告
-                    if now_ts >= self._next_hourly_notice_time:
-                        self._next_hourly_notice_time = now_ts + 3600.0
-                        hours = int((now_ts - self._run_start_time) / 3600)
-                        self._show_sponsor_notice(hours)
                     # 请求切换回模式1（来自配置变更）
                     if self._request_switch_mode1:
                         self._request_switch_mode1 = False
