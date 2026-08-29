@@ -3,15 +3,12 @@
 
 ## 🆓 免费声明
 
-**WOA AutoBot 是一款完全免费的脚本工具。**
+**WOA AutoBot 是一款完全开源免费的脚本工具。**
 
 - ✅ 本脚本**永久免费**，不收取任何费用
-- ✅ 官方唯一发布渠道：[GitHub](https://github.com/hjtr7mymht-dot/WOA_AutoBot)
+- ✅ 官方唯一发布渠道：[GitHub](https://github.com/fengfeng-qwq/WOA-AutoBot-GPL3-base)
 - ⚠️ **如您是从任何第三方渠道（淘宝、拼多多、微信等）付费购买的，请立即退款并举报！**
 
-> 💙 赞助支持：如果您认可本项目并愿意提供支持，**仅在闲鱼**设有赞助渠道。
-> - 闲鱼用户名：**MythZx**
-> - 除此之外的**所有闲鱼卖家、淘宝店铺、微信群、QQ群收费推广均为第三方倒卖**，与作者无关
 
 ---
 
@@ -53,3 +50,9 @@
 ## 免责声明
 
 本工具仅供学习交流使用，请勿用于商业用途。使用本工具产生的任何后果由用户自行承担。
+
+## 版权声明
+
+- Copyright (C) 2026 nj-yzf（原始项目）
+- Copyright (C) 2026 hjtr7mymht-dot（二创修改，源自其 GPL v3 历史版本）
+- Copyright (C) 2026 fengfeng-qwq（本仓库修改）
