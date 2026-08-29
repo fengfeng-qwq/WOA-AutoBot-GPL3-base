@@ -152,4 +152,12 @@ python gui_launcher.py
 - 程序每次启动都会自动进行一次联网版本检测（GitHub Raw -> jsDelivr -> ghproxy）。
 - 检测到新版本时会直接弹窗提示，不会自动下载、覆盖或重启。
 - 运行过程中不再执行自动更新逻辑，避免覆盖失败或误替换带来的风险。
+ 
+## 版权声明
+
+- Copyright (C) 2026 nj-yzf（原始项目）
+- Copyright (C) 2026 hjtr7mymht-dot（二创修改，源自其 GPL v3 历史版本）
+- Copyright (C) 2026 fengfeng-qwq（本仓库修改）
+
+本程序是自由软件：你可以按照自由软件基金会发布的 GNU 通用公共许可证第三版（GPL v3）的条款重新分发和/或修改它。
 
