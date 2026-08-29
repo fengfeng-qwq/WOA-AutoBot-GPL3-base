@@ -848,11 +848,6 @@ class Application(ttkb.Window):
         else:
             sys.stdout = self.redirector
 
-        self._prepare_first_run_environment(
-            force=(not self._config_file_exists) or (not self.config.get("initial_device_paths_detected", False)),
-            reason="首次启动",
-        )
-
         self.container_main = ttkb.Frame(self)
         self.container_mini = ttkb.Frame(self)
 
@@ -863,6 +858,13 @@ class Application(ttkb.Window):
         self.after(self.queue_check_interval, self.process_log_queue)
         # 后台定时任务：由 BackgroundWorker 驱动的统一 tick（每 10min 触发一次）
         self._schedule_bg_tick()
+
+        # 环境检测异步执行，避免阻塞主线程导致启动卡顿
+        _env_force = (not self._config_file_exists) or (not self.config.get("initial_device_paths_detected", False))
+        self.after_idle(lambda: self._bg_worker.submit(
+            lambda: self._prepare_first_run_environment(force=_env_force, reason="首次启动"),
+            callback=self._on_env_ready,
+        ))
 
         # ═══════════ 窗口生命周期（仅初始化一次！不要放在定时回调中）═══════════
         self._icon_loaded = False
@@ -1897,10 +1899,18 @@ class Application(ttkb.Window):
             messages.append("已切换 MuMu ADB" if "MuMu" in detected_adb or "Netease" in detected_adb else "已切换内置 ADB")
 
         final_message = " / ".join(dict.fromkeys([m for m in messages if m])) or "环境初始化完成"
-        self._set_system_status(final_message)
-        if changed:
+        return {"changed": changed, "message": final_message}
+
+    def _on_env_ready(self, result):
+        if isinstance(result, Exception):
+            self._set_system_status(f"环境检测异常: {result}")
+            return
+        if not isinstance(result, dict):
+            return
+        self._set_system_status(result.get("message", "环境初始化完成"))
+        if result.get("changed"):
             self.var_runtime_status.set("环境已就绪")
-        return changed
+            self.save_config()
 
     def _maybe_detect_initial_emulator_paths(self, force=False, reason="启动"):
         if not force and self.config.get("initial_device_paths_detected", False):
@@ -1936,7 +1946,6 @@ class Application(ttkb.Window):
 
         self.config["initial_device_paths_detected"] = True
         if changed or force:
-            self.save_config()
             print(
                 f">>> [初始化] {reason}自动检测完成: MuMu={self.config.get('mumu_path', '未发现')} | ADB={self.config.get('adb_path', '默认')}"
             )
@@ -3394,7 +3403,6 @@ class Application(ttkb.Window):
         if hasattr(self, 'settings_win') and self.settings_win.winfo_exists():
             self.settings_win.lift()
             return
-            return
         win = ttkb.Toplevel(self)
         self.settings_win = win
         win.title("高级设置")
@@ -3425,19 +3433,23 @@ class Application(ttkb.Window):
         canvas.pack(side=LEFT, fill=BOTH, expand=True)
         scrollbar.pack(side=RIGHT, fill=Y)
 
-        # ── 鼠标滚轮滚动 ──
+        # ── 鼠标滚轮滚动（bind_all 捕获窗口内所有滚轮事件）──
         def _on_settings_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        # 绑定到 canvas 及其所有子控件，在任何位置滚轮都能滚动
-        canvas.bind("<MouseWheel>", _on_settings_mousewheel)
-        body.bind("<MouseWheel>", _on_settings_mousewheel)
-        scrollbar.bind("<MouseWheel>", _on_settings_mousewheel)
-        # 窗口关闭时解绑，防止影响其他窗口
+            try:
+                w = event.widget
+                while w:
+                    if w == win:
+                        canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                        return "break"
+                    w = w.master
+            except Exception:
+                pass
+
+        win.bind_all("<MouseWheel>", _on_settings_mousewheel)
+
         def _unbind_settings_wheel(e=None):
             try:
-                canvas.unbind("<MouseWheel>")
-                body.unbind("<MouseWheel>")
-                scrollbar.unbind("<MouseWheel>")
+                win.unbind_all("<MouseWheel>")
             except Exception:
                 pass
         win.bind("<Destroy>", _unbind_settings_wheel)
@@ -4177,10 +4189,15 @@ class Application(ttkb.Window):
         win.after(50, lambda: self._center_toplevel_on_parent(win))
 
     def refresh_devices(self):
-        self._prepare_first_run_environment(
+        env_result = self._prepare_first_run_environment(
             force=not self.config.get("initial_device_paths_detected", False),
             reason="首次智能扫描",
         )
+        if isinstance(env_result, dict):
+            self._set_system_status(env_result.get("message", "环境初始化完成"))
+            if env_result.get("changed"):
+                self.var_runtime_status.set("环境已就绪")
+                self.save_config()
         print(">>> 正在扫描设备...")
         self.var_device_status.set("扫描中")
         self.btn_scan.configure(text="扫描中...", state="disabled")

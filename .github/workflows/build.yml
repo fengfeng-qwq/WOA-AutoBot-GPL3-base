@@ -35,6 +35,7 @@ jobs:
   build-windows:
     name: Windows — PyInstaller .exe
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -72,6 +73,7 @@ jobs:
   build-macos:
     name: macOS — PyInstaller .app
     runs-on: macos-latest
+    timeout-minutes: 30
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -94,10 +96,11 @@ jobs:
           echo "=== 编译产物 ==="
           ls -la dist/
 
-      - name: 打包为 ZIP
+      - name: 打包为 ZIP（ditto 保留 symlink 与权限）
         run: |
           cd dist
-          zip -r "../${{ env.APP_NAME }}_macOS.zip" "${{ env.APP_NAME }}.app"
+          ditto -c -k --keepParent "${{ env.APP_NAME }}.app" "../${{ env.APP_NAME }}_macOS.zip"
+          ls -lh "../${{ env.APP_NAME }}_macOS.zip"
 
       - name: 上传 Workflow Artifact
         uses: actions/upload-artifact@v4
@@ -112,6 +115,7 @@ jobs:
     name: 发布 GitHub Release
     needs: [build-windows, build-macos]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     if: |
       github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true'
       || startsWith(github.ref, 'refs/tags/v')
