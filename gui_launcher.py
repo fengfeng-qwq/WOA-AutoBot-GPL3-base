@@ -861,8 +861,7 @@ class Application(ttkb.Window):
 
         self.container_main.pack(fill=BOTH, expand=True)
         self.after(self.queue_check_interval, self.process_log_queue)
-        # 后台定时任务：由 BackgroundWorker 驱动的统一 tick（每 30s 触发一次）
-        self._bg_tick_counter = 0
+        # 后台定时任务：由 BackgroundWorker 驱动的统一 tick（每 10min 触发一次）
         self._schedule_bg_tick()
 
         # ═══════════ 窗口生命周期（仅初始化一次！不要放在定时回调中）═══════════
@@ -890,17 +889,15 @@ class Application(ttkb.Window):
                 pass
 
     def _schedule_bg_tick(self):
-        """每 30 秒在后台线程执行一次定时检查（统计汇报/金币提醒），结果通过 after 回主线程。
-        每 20 个 tick（10 分钟）还会在主线程执行一次残留锁清理。
+        """每 10 分钟在后台线程执行一次定时检查（统计汇报/金币提醒），结果通过 after 回主线程。
+        每次 tick 还会在主线程执行一次残留锁清理。
         
         tkinter 变量的读取在主线程（此处）完成，避免后台线程跨线程访问 Tcl 变量导致内存损坏。"""
-        # 每 10 分钟清理一次残留锁文件
-        self._bg_tick_counter += 1
-        if self._bg_tick_counter % 20 == 0:
-            try:
-                _cleanup_dead_locks()
-            except Exception:
-                pass
+        # 清理残留锁文件
+        try:
+            _cleanup_dead_locks()
+        except Exception:
+            pass
         # 在主线程读取 tkinter 变量值，传给后台线程避免跨线程 Tcl 访问
         bg_args = {
             "notify_enabled": bool(self.var_notify_enabled.get()),
@@ -910,7 +907,7 @@ class Application(ttkb.Window):
             "notify_webhook": str(self.var_notify_webhook.get() or "").strip(),
         }
         self._bg_worker.submit(self._do_bg_tick, args=(bg_args,), callback=self._on_bg_tick_done)
-        self.after(30000, self._schedule_bg_tick)
+        self.after(600000, self._schedule_bg_tick)
 
     def _call_main_thread(self, callback):
         """线程安全地将一个零参数回调投递到主线程执行。
@@ -965,7 +962,7 @@ class Application(ttkb.Window):
         bg_args: 由主线程 _schedule_bg_tick 传入的配置参数字典，
                  包含 notify_enabled/stats_report_enabled/stats_report_hours/
                  gold_remind_enabled/notify_webhook 等，避免后台线程跨线程访问 Tcl 变量。"""
-        result = {"stats": None, "gold": None, "tick": self._bg_tick_counter}
+        result = {"stats": None, "gold": None}
 
         # 统计汇报检查
         if bg_args.get("notify_enabled") and bg_args.get("stats_report_enabled"):
