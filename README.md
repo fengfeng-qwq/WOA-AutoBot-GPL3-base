@@ -1,8 +1,6 @@
 # WOA AutoBot
 
 > 声明：此脚本完全免费。若你通过付费渠道获得，请立即退款并举报。
-> 官方交流与反馈：QQ群 1067076460
-> 作者网站：https://hjtr7mymht-dot.github.io/   （个人博客与最新动态）
 WOA AutoBot 是一款面向 World of Airports 的自动化辅助工具，目标是减少重复点击、提高挂机稳定性，并保留足够的可配置能力，方便不同模拟器和不同机场节奏下使用。
 **现已完整支持 macOS（Apple Silicon / Intel）与 Windows 双平台。**
 
@@ -10,10 +8,8 @@ WOA AutoBot 是一款面向 World of Airports 的自动化辅助工具，目标�
 
 ## 项目说明
 
-- 本项目为二创重置项目，原项目链接为 https://github.com/nj-yzf/WOA_AutoBot
-- 当前官方仓库为 https://github.com/hjtr7mymht-dot/WOA_AutoBot
-- 作者个人网站：https://hjtr7mymht-dot.github.io/
-- 路线查找器：https://github.com/hjtr7mymht-dot/ARPA-FOR-WOA   （自动航路规划工具）
+- 鸣谢创作者（[nj-yzf](https://github.com/nj-yzf/WOA_AutoBot)）开发的原始项目。
+- 本仓库代码复制自二创项目（[hjtr7mymht-dot/WOA_AutoBot](https://github.com/hjtr7mymht-dot/WOA_AutoBot)）在更改许可协议前的 GPL v3 历史版本，并在此基础上继续以 GPL v3 协议开源维护。
 - 项目开发过程中，模拟器连接与控制逻辑参考了 https://github.com/LmeSzinc/AzurLaneAutoScript 的部分设计思路
 
 ## 软件功能
