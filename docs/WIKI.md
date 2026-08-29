@@ -480,7 +480,7 @@ WOA_AutoBot/
 如发现数据异常，可直接用 Excel/文本编辑器查看和修正 CSV 文件。
 
 ### Q7：如何更新到新版本
-**A**：程序启动时会提示有新版本，前往 [GitHub Releases](https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases) 下载新版 zip，解压覆盖旧目录即可（`config.json` 会自动保留）。
+**A**：程序启动时会提示有新版本，前往 [GitHub Releases](https://github.com/hjtr7mymht-dot/fengfeng-qwq/WOA-AutoBot-GPL3-base/releases) 下载新版 zip，解压覆盖旧目录即可（`config.json` 会自动保留）。
 
 ### Q8：macOS 上无法启动应用
 **A**：首次启动如提示"未识别的开发者"，请右键点击 → 打开 → 仍要打开。  
