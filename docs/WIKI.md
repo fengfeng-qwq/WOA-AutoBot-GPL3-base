@@ -449,7 +449,7 @@ WOA_AutoBot/
 
 - 本项目仅供学习交流使用，完全免费。若通过付费渠道获得，请立即退款并举报。
 - 使用自动化工具存在账号封禁、误操作、资源损失等风险，后果由使用者自行承担。
-- 若遇问题，请优先在 [官方 Issues](https://github.com/hjtr7mymht-dot/WOA_AutoBot/issues) 或 QQ 群 **1067076460** 反馈。
+- 若遇问题，请优先在 [官方 Issues](https://github.com/fengfeng-qwq/WOA-AutoBot-GPL3-base/issues) 反馈。
 
 ---
 
