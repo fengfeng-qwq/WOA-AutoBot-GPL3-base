@@ -96,45 +96,14 @@ def get_bundled_resource_path(relative_path):
 
 
 def ensure_local_platform_tools():
-    """确保 adb_tools 目录存在可用的本地 ADB 运行文件，缺失时从内置 platform-tools 自动补齐。"""
-    source_dir = get_bundled_resource_path("platform-tools")
-    target_dir = get_bundled_resource_path("adb_tools")
-    copied = []
-    errors = []
-
-    try:
-        os.makedirs(target_dir, exist_ok=True)
-    except Exception as exc:
-        errors.append(f"创建 adb_tools 目录失败: {exc}")
-
-    if os.path.isdir(source_dir):
-        try:
-            for name in os.listdir(source_dir):
-                src = os.path.join(source_dir, name)
-                dst = os.path.join(target_dir, name)
-                if not os.path.isfile(src):
-                    continue
-                if os.path.isfile(dst) and os.path.getsize(dst) > 0:
-                    continue
-                try:
-                    shutil.copy2(src, dst)
-                    copied.append(name)
-                except Exception as exc:
-                    errors.append(f"复制 {name} 失败: {exc}")
-        except Exception as exc:
-            errors.append(f"遍历 platform-tools 失败: {exc}")
-    else:
-        errors.append("未找到内置 platform-tools 目录")
-
-    adb_path = os.path.join(target_dir, ADB_EXE_NAME)
-    ready = os.path.isfile(adb_path)
+    """校验内置 adb_tools 目录中的 ADB 可执行文件可用，并返回其路径。"""
+    tools_dir = get_bundled_resource_path("adb_tools")
+    adb_path = os.path.join(tools_dir, ADB_EXE_NAME)
+    ready = os.path.isfile(adb_path) and os.path.getsize(adb_path) > 0
     return {
-        "source_dir": source_dir,
-        "target_dir": target_dir,
-        "copied": copied,
+        "tools_dir": tools_dir,
         "adb_path": adb_path if ready else "",
         "ready": ready,
-        "errors": errors,
     }
 
 

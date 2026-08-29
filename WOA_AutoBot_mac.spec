@@ -31,7 +31,6 @@ a = Analysis(
         ('assets', 'assets'),
         ('icon', 'icon'),
         ('adb_tools', 'adb_tools'),
-        ('platform-tools', 'platform-tools'),
         ('config.json', '.'),
         ('version.json', '.'),
         ('ANNOUNCEMENT.md', '.'),
@@ -95,8 +94,7 @@ a = Analysis(
 pyz = PYZ(a.pure, cipher=block_cipher)
 
 adb_data = ('adb_tools/' + ADB, os.path.join('adb_tools', ADB), 'DATA')
-plat_data = ('platform-tools/' + ADB, os.path.join('platform-tools', ADB), 'DATA')
-all_extra_datas = [adb_data, plat_data]
+all_extra_datas = [adb_data]
 
 exe = EXE(
     pyz,

@@ -1830,12 +1830,7 @@ class Application(ttkb.Window):
     def _ensure_local_android_sdk(self):
         result = ensure_local_platform_tools()
         messages = []
-        if result.get("copied"):
-            copied = result["copied"]
-            preview = ", ".join(copied[:3])
-            suffix = "..." if len(copied) > 3 else ""
-            messages.append(f"已自动安装 Platform Tools 缺失文件: {preview}{suffix}")
-        elif result.get("ready"):
+        if result.get("ready"):
             messages.append("已检测到内置 Android SDK Platform Tools")
         else:
             messages.append("未检测到可用 Platform Tools")

@@ -84,7 +84,7 @@
            ┌───────────────┼────────────────┐
            ▼               ▼                ▼
     nemu_ipc.py       ADB 子进程        uiautomator2
-  (MuMu 原生 DLL)  (platform-tools/)   (设备 HTTP 服务)
+  (MuMu 原生 DLL)  (adb_tools/)       (设备 HTTP 服务)
            └───────────────┼────────────────┘
                            ▼
             安卓模拟器 / 真机（运行 WOA）
@@ -400,8 +400,7 @@ python -m PyInstaller -y --clean WOA_AutoBot.spec
 |------|------|
 | `icon/` | 游戏 UI 模板图片（~50+ PNG） |
 | `assets/` | UI 资源与捐助二维码 |
-| `adb_tools/` | 内置 ADB 可执行文件 |
-| `platform-tools/` | 备用 ADB 工具 |
+| `adb_tools/` | 内置 ADB（`adb` / `adb.exe` 及平台依赖库） |
 | `config.json` | 默认配置文件 |
 | `version_info.txt` | Windows EXE 版本信息 |
 
@@ -425,8 +424,7 @@ WOA_AutoBot/
 ├── requirements.txt         # Python 依赖列表
 ├── icon/                    # 游戏 UI 模板图片
 ├── assets/                  # UI 资源（捐助二维码等）
-├── adb_tools/               # 内置 ADB 工具
-├── platform-tools/          # 备用 ADB 工具
+├── adb_tools/               # 内置 ADB（唯一 ADB 来源）
 ├── docs/                    # 文档目录
 │   ├── WIKI.md              # 本文档
 │   └── GITHUB_RELEASE_PLAYBOOK.md  # 发布流程规范

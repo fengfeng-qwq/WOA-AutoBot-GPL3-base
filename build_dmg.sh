@@ -15,7 +15,6 @@ $PYINST --clean -y --onedir --windowed --name $APP_NAME \
   --add-data "assets:assets" \
   --add-data "icon:icon" \
   --add-data "adb_tools:adb_tools" \
-  --add-data "platform-tools:platform-tools" \
   --add-data "config.json:." \
   --add-data "version.json:." \
   --add-data "GUIDE.md:." \
@@ -121,7 +120,6 @@ PLIST
 
 echo ">>> [4/6] 修复 adb 权限..."
 find "$APP" -path "*/adb_tools/adb" -type f -exec chmod +x {} \; 2>/dev/null || true
-find "$APP" -path "*/platform-tools/adb" -type f -exec chmod +x {} \; 2>/dev/null || true
 
 echo ">>> [5/6] 清理资源分叉并签名..."
 # 用 ditto 剥离资源分叉（解决 macOS 26 codesign "resource fork" 错误）
