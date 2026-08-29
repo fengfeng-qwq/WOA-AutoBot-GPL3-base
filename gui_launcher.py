@@ -870,8 +870,24 @@ class Application(ttkb.Window):
         self._help_badge = None
         self.after(500, self.setup_window_icon)
         self.after(800, self._auto_show_help_on_first_launch)
+        self.after(1200, self._emit_startup_notice)
         self.bind("<Map>", self._on_window_map)
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
+
+    def _emit_startup_notice(self):
+        """仅在启动时输出一次免费声明与 GitHub 反馈信息。"""
+        m1 = "此脚本为开源免费项目，如您是从任何渠道，例如淘宝、闲鱼、拼多多购买的，请立即退款并举报！"
+        m2 = "获取更新和反馈问题请前往 Github。"
+        print(m1)
+        print(m2)
+        orig = getattr(sys, "__stdout__", None)
+        if orig and getattr(sys, "stdout", None) is not orig:
+            try:
+                orig.write(m1 + "\n")
+                orig.write(m2 + "\n")
+                orig.flush()
+            except Exception:
+                pass
 
     def _schedule_bg_tick(self):
         """每 30 秒在后台线程执行一次定时检查（统计汇报/金币提醒），结果通过 after 回主线程。
@@ -1007,21 +1023,6 @@ class Application(ttkb.Window):
             title, detail = result["gold"]
             self._send_mobile_notify(title, detail, force=True)
             print(f">>> [金币提醒] {title.split(maxsplit=1)[-1] if ' ' in title else title} 已推送")
-
-        def _emit_notice():
-            m1 = "此脚本为开源免费项目，如您是从任何渠道，例如淘宝、闲鱼、拼多多购买的，请立即退款并举报！"
-            m2 = "获取更新和反馈问题请加入QQ群1067076460。"
-            print(m1)
-            print(m2)
-            orig = getattr(sys, "__stdout__", None)
-            if orig and getattr(sys, "stdout", None) is not orig:
-                try:
-                    orig.write(m1 + "\n")
-                    orig.write(m2 + "\n")
-                    orig.flush()
-                except Exception:
-                    pass
-        self.after(100, _emit_notice)
 
     def _on_closing(self):
         """关闭窗口时停止脚本并彻底清理资源，避免进程残留和锁文件堆积"""
