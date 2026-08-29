@@ -4,11 +4,10 @@
 
 ## 🆓 免费声明
 
-**WOA AutoBot 是一款完全免费的脚本工具，不收取任何费用。**
+**WOA AutoBot 是一款完全免费开源的脚本工具，不收取任何费用。**
 
 如您是从淘宝、拼多多、微信等任何第三方渠道付费购买的，请立即退款并举报——那些全部是倒卖行为，与作者无关。
 
-> 💙 唯一赞助渠道：**闲鱼**，用户名 **MythZx**。其他闲鱼卖家均为第三方倒卖。
 
 ---
 
@@ -173,7 +172,7 @@ A: 手动指定 MuMu 安装路径（设置 → MuMu 路径），路径到 `MuMuP
 A: 先尝试手动指定 ADB 路径；检查是否连接了正确的端口（优先 16384/16416）
 
 **Q: 脚本收费吗？**
-A: **完全免费！** 官方仅在 GitHub 和 QQ 群发布。如果您付费购买了此脚本，您被骗了——请立即退款并举报卖家。
+A: **完全免费！** 官方仅在 GitHub 发布。如果您付费购买了此脚本，您被骗了——请立即退款并举报卖家。
 
 ---
 
@@ -197,8 +196,6 @@ A: **完全免费！** 官方仅在 GitHub 和 QQ 群发布。如果您付费购
 
 ## 🔗 相关链接
 
-- 官方仓库：[GitHub](https://github.com/hjtr7mymht-dot/WOA_AutoBot)
-- 反馈群：**QQ 1067076460**
-- 赞助支持：闲鱼搜索 **MythZx**（唯一官方渠道）
-- 作者网站：[个人博客](https://hjtr7mymht-dot.github.io/)
-- 路线查找器：[ARPA-FOR-WOA](https://github.com/hjtr7mymht-dot/ARPA-FOR-WOA)（自动航路规划工具）
+- 官方仓库：[GitHub](https://github.com/fengfeng-qwq/WOA-AutoBot-GPL3-base/)
+- 本项目基于[nj-yzf](https://github.com/nj-yzf/WOA_AutoBot)衍生
+- 代码复制自[hjtr7mymht-dot](https://github.com//hjtr7mymht-dot/WOA_AutoBot/)更改许可协议前的 GPL v3 历史版本。
