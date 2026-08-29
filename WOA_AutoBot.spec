@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('assets', 'assets'), ('icon', 'icon'), ('adb_tools', 'adb_tools'), ('config.json', '.'), ('version.json', '.'), ('GUIDE.md', '.'), ('ANNOUNCEMENT.md', '.'), ('docs', 'docs'), ('icon/digits', 'icon/digits'), ('icon/digits/global', 'icon/digits/global'), ('icon/digits/task', 'icon/digits/task')]
+datas = [('assets', 'assets'), ('icon', 'icon'), ('adb_tools', 'adb_tools'), ('version.json', '.'), ('GUIDE.md', '.'), ('ANNOUNCEMENT.md', '.'), ('docs', 'docs'), ('icon/digits', 'icon/digits'), ('icon/digits/global', 'icon/digits/global'), ('icon/digits/task', 'icon/digits/task')]
 binaries = []
 hiddenimports = ['tkinter', 'tkinter.scrolledtext', 'tkinter.filedialog', 'tkinter.messagebox', 'tkinter.ttk', 'tkinter.constants', 'ttkbootstrap', 'ttkbootstrap.constants', 'ttkbootstrap.style', 'ttkbootstrap.widgets', 'ttkbootstrap.themes', 'PIL', 'PIL.Image', 'PIL.ImageTk', 'PIL.ImageDraw', 'PIL.ImageFont', 'PIL.ImageFilter', 'PIL.ImageOps', 'PIL._tkinter_finder', 'PIL._imagingtk', 'cv2', 'numpy', 'orjson', 'cachetools', 'uiautomator2', 'uiautomator2._funcs', 'adbutils', 'adbutils._adb', 'lxml', 'lxml.etree', 'requests', 'urllib3', 'pystray', 'certifi', 'ssl', 'adb_controller', 'simple_ocr', 'gui_launcher', 'main_adb', 'nemu_ipc', 'platform_utils', 'woa_debug', 'emulator_discovery', 'core', 'core.constants', 'core.platform', 'core.resources', 'core.debug', 'bot', 'bot.config', 'bot.tower', 'bot.filter']
 tmp_ret = collect_all('tkinter')

@@ -31,7 +31,6 @@ a = Analysis(
         ('assets', 'assets'),
         ('icon', 'icon'),
         ('adb_tools', 'adb_tools'),
-        ('config.json', '.'),
         ('version.json', '.'),
         ('ANNOUNCEMENT.md', '.'),
         ('GUIDE.md', '.'),
