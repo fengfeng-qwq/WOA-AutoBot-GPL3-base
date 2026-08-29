@@ -43,9 +43,9 @@ WOA AutoBot 是一款面向 World of Airports 的自动化辅助工具，目标�
 | 平台 | 状态 | 说明 |
 |------|------|------|
 | **Windows 10/11** | ✅ 完整支持 | 推荐 MuMu12 模拟器，支持 nemu_ipc 高速截图 |
-| **macOS (Intel)** | ✅ 完整支持 | 通过 `uv run python gui_launcher.py` 运行，或使用打包的 .app/.dmg |
-| **macOS (Apple Silicon)** | ✅ 完整支持 | 原生 arm64 支持，已测试 M 系列芯片 |
 | **Linux** | ⚠️ 基础兼容 | ADB 连接可用，部分截图方案需手动配置 |
+| **macOS (Intel)** | ⚠️ 须自行验证 | 通过 `uv run python gui_launcher.py` 运行 |
+| **macOS (Apple Silicon)** | ⚠️ 须自行验证 | 原生 arm64 支持 |
 
 ### macOS 注意事项
 - 需要安装 [Android Platform Tools](https://developer.android.com/studio/releases/platform-tools) 或将项目内 `adb_tools/adb` 加入 PATH
@@ -55,12 +55,6 @@ WOA AutoBot 是一款面向 World of Airports 的自动化辅助工具，目标�
 
 ## 快速开始
 
-### macOS 用户
-1. 下载 `WOA_AutoBot_macOS.dmg`，双击打开
-2. 将 `WOA_AutoBot.app` 拖入 Applications 文件夹
-3. 首次打开如提示"未识别的开发者"：**右键 → 打开 → 仍要打开**
-4. 连接安卓模拟器或真机（需开启 ADB 调试）
-5. 在设备下拉框选择目标设备，点击 **启动**
 
 ### Windows 用户
 1. 解压后运行 `WOA_AutoBot.exe`
