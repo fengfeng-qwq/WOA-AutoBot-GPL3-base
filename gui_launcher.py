@@ -2372,12 +2372,6 @@ class Application(ttkb.Window):
         self.btn_theme = ttkb.Button(btn_row, text="🌙 深色" if not self._theme_is_dark else "☀️ 浅色",
                                       bootstyle="outline-secondary", command=self.toggle_theme, padding=(8, 2))
         self.btn_theme.pack(side=LEFT, padx=2)
-        for text, bootstyle, cmd in [
-            ("🌐 作者", "outline-secondary", self.open_personal_website),
-            ("🗺️ 路线", "outline-secondary", self.open_arpa_repo),
-        ]:
-            btn = ttkb.Button(btn_row, text=text, bootstyle=bootstyle, command=cmd, padding=(8, 2))
-            btn.pack(side=LEFT, padx=2)
         # 公告 / 说明 按钮（内容由 ANNOUNCEMENT.md 和 GUIDE.md 控制，用户可自由编辑）
         ttkb.Button(btn_row, text="📢 公告", bootstyle="outline-info",
                     command=self.open_announcement_window, padding=(8, 2)).pack(side=LEFT, padx=2)
@@ -3462,11 +3456,6 @@ class Application(ttkb.Window):
         top_action_row = ttkb.Frame(body)
         top_action_row.pack(fill=X, pady=(0, 16))
 
-        online_btn_row = ttkb.Frame(body)
-        online_btn_row.pack(fill=X, pady=(0, 14))
-        ttkb.Button(online_btn_row, text="作者网站", bootstyle="info-outline", command=self.open_personal_website).pack(side=LEFT, padx=8)
-        ttkb.Button(online_btn_row, text="🗺️ 路线查找", bootstyle="success-outline", command=self.open_arpa_repo).pack(side=LEFT, padx=(0, 8))
-
         notebook = ttkb.Notebook(body, bootstyle="primary")
         notebook.pack(fill=BOTH, expand=True, pady=(0, 12))
         tab_device = ttkb.Frame(notebook, padding=16)
@@ -4186,8 +4175,6 @@ class Application(ttkb.Window):
         ttkb.Button(top_action_row, text="💾 保存设置", bootstyle="success", width=18, padding=(8, 4), command=save).pack(side=LEFT)
         ttkb.Button(top_action_row, text="📊 统计图表", bootstyle="info-outline", width=18, padding=(8, 4),
                 command=self._open_stats_chart).pack(side=LEFT, padx=(12, 0))
-        ttkb.Button(top_action_row, text="❤️ 自愿资助", bootstyle="warning-outline", width=18, padding=(8, 4),
-            command=self.open_donate_window).pack(side=LEFT, padx=(12, 0))
         ttkb.Separator(body, bootstyle="primary").pack(fill=X, pady=12)
         win.after(50, lambda: self._center_toplevel_on_parent(win))
 
