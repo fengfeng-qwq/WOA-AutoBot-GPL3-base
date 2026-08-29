@@ -1,6 +1,6 @@
 # WOA AutoBot — 项目 WIKI
 
-> 本 WIKI 由 Copilot 根据源码自动生成，版本对应 **v1.4.1**。  
+> 本 WIKI 由 Copilot 根据源码自动生成，版本对应 **v1.5.0**。  
 > 如有内容过时，欢迎提交 PR 或在 Issues 中反馈。
 
 ---
@@ -25,17 +25,17 @@
 
 ## 1. 项目简介
 
-**WOA AutoBot** 是面向手游《World of Airports（世界机场）》的 Windows 自动化辅助脚本。  
-它通过 ADB 或 uiautomator2 连接安卓模拟器，利用 OpenCV 模板匹配 + 自定义 OCR 识别游戏界面，
+**WOA AutoBot** 是面向手游《World of Airports（世界机场）》的跨平台自动化辅助脚本。  
+它通过 ADB 或 uiautomator2 连接安卓模拟器或真机，利用 OpenCV 模板匹配 + 自定义 OCR 识别游戏界面，
 自动完成地勤、除冰、维修、进近、滑行、起飞等重复性操作，让玩家无需持续盯屏即可挂机。
 
 | 属性 | 说明 |
 |------|------|
-| 运行平台 | Windows 10 / 11（64 位） |
+| 运行平台 | Windows 10 / 11、macOS (Intel & Apple Silicon)、Linux |
 | 目标设备 | 安卓模拟器（推荐 MuMu 12）或真机 |
 | 游戏语言要求 | **简体中文**（UI 模板均以简中截图制作） |
 | 游戏分辨率 | 建议横屏，脚本自动适配常见横屏分辨率 |
-| 当前版本 | 1.0.6 |
+| 当前版本 | 1.5.0 |
 | 官方仓库 | https://github.com/hjtr7mymht-dot/WOA_AutoBot |
 | 原始项目 | https://github.com/nj-yzf/WOA_AutoBot |
 | 官方群 | QQ 群 1067076460 |
@@ -80,13 +80,13 @@
 │   │  方案自检 & 自动回退                                  │   │
 │   └────────────────────────────────────────────────────┘   │
 └──────────────────────────┬──────────────────────────────────┘
-           ┌───────────────┼────────────────┐
-           ▼               ▼                ▼
-    nemu_ipc.py       ADB 子进程        uiautomator2
-  (MuMu 原生 DLL)  (adb_tools/)       (设备 HTTP 服务)
-           └───────────────┼────────────────┘
-                           ▼
-            安卓模拟器 / 真机（运行 WOA）
+            ┌───────────────┼────────────────┐
+            ▼               ▼                ▼
+     nemu_ipc.py       ADB 子进程        uiautomator2
+   (MuMu 原生 DLL)  (adb_tools/)       (设备 HTTP 服务)
+            └───────────────┼────────────────┘
+                            ▼
+             安卓模拟器 / 真机（运行 WOA）
 ```
 
 ### 辅助模块
@@ -96,6 +96,7 @@
 | `simple_ocr.py` | 基于数字/图标模板的轻量 OCR，识别地勤数量、费用等 |
 | `emulator_discovery.py` | 扫描本机运行中的模拟器，自动获取 ADB 端口列表 |
 | `woa_debug.py` | 调试工具：保存截图、打印像素颜色等辅助函数 |
+| `core/` | 跨平台核心模块（platform、debug 等工具库） |
 
 ---
 
@@ -341,32 +342,46 @@ WOA AutoBot 最多支持 **3 个实例**同时运行，适合多账号或多模�
 
 ### 11.1 环境准备
 
-```
-Python 3.x（推荐 3.10 / 3.11）
-Windows 10 / 11
-```
+**跨平台环境要求**
+
+| 平台 | 要求 |
+|------|------|
+| **Windows** | Python 3.10+、Windows 10/11 (64-bit) |
+| **macOS** | Python 3.10+、macOS 10.13+ (Intel/Apple Silicon) |
+| **Linux** | Python 3.10+、X11 或 Wayland 桌面环境 |
 
 安装依赖：
 
-```powershell
+```bash
 pip install -r requirements.txt
 ```
 
-> 主要依赖：`opencv-python==4.13.0.90`、`numpy==2.4.1`、`Pillow==12.1.0`、  
-> `uiautomator2==3.5.0`、`ttkbootstrap==1.2.0`、`requests==2.32.5`
+> 主要依赖：  
+> - **ADB & 设备控制**：`adbutils>=2.12.0`、`uiautomator2>=3.0.0`、`uiautomator2cache>=0.3.0`
+> - **图像识别**：`opencv-python>=4.8.0`、`numpy>=1.26.0`、`Pillow>=10.0`
+> - **UI 框架**：`ttkbootstrap>=1.20.0`
+> - **网络工具**：`requests>=2.28.0`、`lxml>=5.0`、`certifi>=2024.0`、`urllib3>=2.0`
+> - **性能优化**：`orjson>=3.10.0`、`cachetools>=5.0.0`
 
-### 12.2 运行源码
+### 11.2 运行源码
 
+**Windows**
 ```powershell
 python gui_launcher.py
 ```
 
-### 12.3 打包为 EXE
+**macOS / Linux**
+```bash
+python gui_launcher.py
+```
+
+### 11.3 打包为可执行文件
+
+**Windows 打包**
 
 项目使用 PyInstaller，仓库内已提供 `WOA_AutoBot.spec`：
 
 ```powershell
-# 激活虚拟环境后执行
 python -m PyInstaller -y --clean WOA_AutoBot.spec
 ```
 
@@ -374,46 +389,71 @@ python -m PyInstaller -y --clean WOA_AutoBot.spec
 - `dist/WOA_AutoBot/WOA_AutoBot.exe`
 - `dist/WOA_AutoBot.zip`（打包后压缩）
 
-打包前请确保以下目录/文件存在（已在 spec 中声明为资源）：
+**macOS 打包**
+
+使用 `WOA_AutoBot_mac.spec` 打包为 .app bundle 或 .dmg：
+
+```bash
+python -m PyInstaller -y --clean WOA_AutoBot_mac.spec
+```
+
+或使用预置脚本：
+```bash
+bash build_dmg.sh
+```
+
+产物位置：
+- `dist/WOA_AutoBot.app`（应用包）
+- `dist/WOA_AutoBot_macOS.dmg`（安装镜像）
+
+打包前请确保以下资源存在（已在 spec 中声明）：
 
 | 资源 | 说明 |
 |------|------|
 | `icon/` | 游戏 UI 模板图片（~50+ PNG） |
 | `assets/` | UI 资源与捐助二维码 |
-| `adb_tools/` | 内置 ADB（`adb` / `adb.exe` 及平台依赖库） |
+| `adb_tools/` | 内置 ADB（Windows/macOS/Linux 平台二进制及依赖库） |
 | `config.json` | 默认配置文件 |
 | `version_info.txt` | Windows EXE 版本信息 |
 
-### 12.4 项目文件结构
+### 11.4 项目文件结构
 
 ```
 WOA_AutoBot/
-├── gui_launcher.py          # GUI 入口 & 主窗口（~2400 行）
-├── main_adb.py              # 游戏自动化核心逻辑（~2641 行）
-├── adb_controller.py        # 设备通信抽象层（~1868 行）
-├── nemu_ipc.py              # MuMu 原生截图模块（~516 行）
-├── simple_ocr.py            # 轻量模板 OCR（~286 行）
-├── emulator_discovery.py    # 模拟器自动发现（~438 行）
-├── woa_debug.py             # 调试工具（~92 行）
-├── config.json              # 实例 1 配置
-├── config_2.json            # 实例 2 配置
-├── config_3.json            # 实例 3 配置（如存在）
-├── version.json             # 当前版本号 & 下载地址
-├── version_info.txt         # PyInstaller EXE 版本信息
-├── WOA_AutoBot.spec         # PyInstaller 打包规格
-├── requirements.txt         # Python 依赖列表
-├── icon/                    # 游戏 UI 模板图片
-├── assets/                  # UI 资源（捐助二维码等）
-├── adb_tools/               # 内置 ADB（唯一 ADB 来源）
-├── docs/                    # 文档目录
-│   ├── WIKI.md              # 本文档
+├── gui_launcher.py              # GUI 入口 & 主窗口
+├── main_adb.py                  # 游戏自动化核心逻辑
+├── adb_controller.py            # 设备通信抽象层
+├── nemu_ipc.py                  # MuMu 原生截图模块（仅 Windows）
+├── simple_ocr.py                # 轻量模板 OCR
+├── emulator_discovery.py        # 模拟器自动发现
+├── woa_debug.py                 # 调试工具
+├── platform_utils.py            # 平台工具（deprecated，已迁移至 core/）
+├── config.json                  # 实例 1 配置
+├── config_2.json                # 实例 2 配置
+├── config_3.json                # 实例 3 配置（如存在）
+├── version.json                 # 当前版本号 & 下载地址
+├── version_info.txt             # Windows EXE 版本信息
+├── WOA_AutoBot.spec             # PyInstaller 打包规格（Windows）
+├── WOA_AutoBot_mac.spec         # PyInstaller 打包规格（macOS）
+├── build_dmg.sh                 # DMG 构建脚本（macOS）
+├── requirements.txt             # Python 依赖列表
+├── icon/                        # 游戏 UI 模板图片
+├── assets/                      # UI 资源（捐助二维码等）
+├── adb_tools/                   # 内置 ADB（跨平台二进制）
+├── bot/                         # 机器人逻辑模块
+├── core/                        # 跨平台核心工具库
+│   ├── platform.py              # 平台检测与路径处理
+│   ├── debug.py                 # 调试工具
+│   └── ...                      # 其他核心模块
+├── docs/                        # 文档目录
+│   ├── WIKI.md                  # 本文档
 │   └── GITHUB_RELEASE_PLAYBOOK.md  # 发布流程规范
-└── dist/                    # 打包输出目录（gitignore）
+└── dist/                        # 打包输出目录（gitignore）
 ```
 
 ---
 
-## 13. 常见问题 FAQ
+## 12. 常见问题 FAQ
 
 ### Q1：点击没有响应 / 点击偏移
 **A**：进入高级设置，将触控方案切换为 `ADB` 或 `uiautomator2` 并重试。  
@@ -441,7 +481,11 @@ WOA_AutoBot/
 如发现数据异常，可直接用 Excel/文本编辑器查看和修正 CSV 文件。
 
 ### Q7：如何更新到新版本
-**A**：程序启动时会提示有新版本，前往 [GitHub Releases](https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases) 下载新版 zip，解压覆盖旧目录即可（`config.json` 会保留）。
+**A**：程序启动时会提示有新版本，前往 [GitHub Releases](https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases) 下载新版 zip，解压覆盖旧目录即可（`config.json` 会自动保留）。
+
+### Q8：macOS 上无法启动应用
+**A**：首次启动如提示"未识别的开发者"，请右键点击 → 打开 → 仍要打开。  
+若提示权限错误，检查 `adb_tools/` 中的二进制文件是否有执行权限（自动 `chmod +x`）。
 
 ---
 
@@ -453,4 +497,4 @@ WOA_AutoBot/
 
 ---
 
-*本文档由 GitHub Copilot 根据源码 v1.0.6 自动生成，最后更新：2026-04-04*
+*本文档由 GitHub Copilot 根据源码 v1.5.0 自动生成，最后更新：2026-08-29*
