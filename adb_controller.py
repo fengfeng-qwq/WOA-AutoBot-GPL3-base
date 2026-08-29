@@ -1,3 +1,22 @@
+# WOA AutoBot — ADB Controller
+# Copyright (C) 2024-2026 WOA AutoBot Contributors
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+# Source: https://github.com/hjtr7mymht-dot/WOA_AutoBot
+# This code is derived from the GPL v3 historical version of the above repository.
+#
 # 此模块的连接逻辑参考了 ALAS 项目的设计思路
 # Reference: https://github.com/LmeSzinc/AzurLaneAutoScript
 
@@ -22,9 +41,6 @@ from woa_debug import (
     _woa_debug_save_click_before, woa_debug_save_roi,
 )
 from nemu_ipc import NemuIpcHelper, _load_dll_safe, NEMU_IPC_DEBUG
-
-# 资助功能完整性守卫标记（从 core 导入）
-from core import FEATURE_GUARD_TOKEN as WOA_FEATURE_GUARD_TOKEN
 
 # 用于进程退出时清理残留（含非正常关闭）
 _adb_instances = []

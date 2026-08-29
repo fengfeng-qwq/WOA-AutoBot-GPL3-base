@@ -1,3 +1,22 @@
+# WOA AutoBot — GUI Launcher
+# Copyright (C) 2024-2026 WOA AutoBot Contributors
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+# Source: https://github.com/hjtr7mymht-dot/WOA_AutoBot
+# This code is derived from the GPL v3 historical version of the above repository.
+
 import sys
 import os
 import threading
@@ -27,8 +46,6 @@ if hasattr(tk, 'Misc') and hasattr(tk.Misc, '__getattr__'):
 import subprocess
 import time
 import webbrowser
-import urllib.error
-import urllib.request
 import adb_controller as adb_mod
 from tkinter import filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
@@ -41,12 +58,9 @@ from core import (
     safe_subprocess_run, get_app_data_dir,
     get_resource_path, get_bundled_resource_path, ICON_DIR,
     get_woa_debug_dir,
-    FEATURE_GUARD_TOKEN, LOCAL_VERSION, MAX_INSTANCES,
-    OFFICIAL_REPO_URL, OFFICIAL_REPO_NAME, ONLINE_VERSION_PATH,
+    LOCAL_VERSION, MAX_INSTANCES,
     ARPA_REPO_URL,
     SIDEBAR_CATEGORIES,
-    REQUIRED_GUARD_MODULES,
-    CORE_FILE_FINGERPRINTS,
     DEFAULT_FONT, MONO_FONT, MUMU_PORTS,
 )
 
@@ -220,10 +234,6 @@ CONFIG_FILE = os.path.join(_DATA_BASE, "config.json" if INSTANCE_ID == 1 else f"
 STATS_FILE = os.path.join(_DATA_BASE, "woa_stats.csv")
 
 # 以下常量已从 core 导入，此处保留局部别名便于内部代码继续使用
-ONLINE_GUARD_RECHECK_SEC = 90
-OFFICIAL_REPO_URL_EXPECTED = OFFICIAL_REPO_URL
-OFFICIAL_REPO_NAME_EXPECTED = OFFICIAL_REPO_NAME
-ONLINE_VERSION_PATH_EXPECTED = ONLINE_VERSION_PATH
 
 DONATE_IMAGE_CANDIDATES = {
     "微信支付": (
@@ -721,7 +731,6 @@ class Application(ttkb.Window):
         self.minsize(120, 120)
         self.last_geometry = "1360x820"
         self.is_mini_mode = False
-        self._strict_online_guard = False  # 离线模式，不强制在线验证
 
         self.var_bonus_staff = tk.BooleanVar(value=self.config.get("bonus_staff", False))
         self.var_vehicle_buy = tk.BooleanVar(value=self.config.get("vehicle_buy", False))
@@ -776,8 +785,6 @@ class Application(ttkb.Window):
         self.var_runtime_status = tk.StringVar(value="待命")
         self.var_device_status = tk.StringVar(value="等待扫描设备")
         self.var_system_status = tk.StringVar(value="环境检查中")
-        self.var_online_status = tk.StringVar(value="未验证")
-        self.var_online_detail = tk.StringVar(value="官方仓库校验未执行")
         
         # 实时运行数据面板变量
         self.var_runtime_duration = tk.StringVar(value="00:00:00")
@@ -796,17 +803,6 @@ class Application(ttkb.Window):
         self.var_staff_avail = tk.StringVar(value="—")
         self._runtime_start_time = None
         
-        self._online_validation_running = False
-        self._online_validation_ok = False
-        self._online_validation_last_ok_ts = 0.0
-        self._online_last_error = "尚未执行在线验证"
-        self._online_guard_lockdown = False
-        self._online_verified_once = bool(self.config.get("online_verified_once", False))
-        self._missing_guard_modules = []
-        self._guard_integrity_ok = True
-        self._startup_update_checked = False
-        self._startup_update_popup_shown = False
-
         if self.config.get("adb_path"):
             set_custom_adb_path(self.config["adb_path"])
 
@@ -874,9 +870,6 @@ class Application(ttkb.Window):
         self._help_badge = None
         self.after(500, self.setup_window_icon)
         self.after(800, self._auto_show_help_on_first_launch)
-        self.after(2200, self._startup_online_update_check)
-        self.after(3000, self._startup_silent_announcement_check)
-        self.after(3500, self._check_file_integrity)
         self.bind("<Map>", self._on_window_map)
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
 
@@ -1352,7 +1345,6 @@ class Application(ttkb.Window):
         self.config["category_processing_enabled"] = bool(self.var_category_processing.get())
         cat_sel = {c["key"]: bool(self.var_category_selection[c["key"]].get()) for c in SIDEBAR_CATEGORIES}
         self.config["category_selection"] = cat_sel
-        self.config["online_verified_once"] = bool(getattr(self, "_online_verified_once", False))
         self.config["initial_device_paths_detected"] = bool(self.config.get("initial_device_paths_detected", False))
         try:
             self.config["auto_delay_count"] = int(self.var_delay_count.get())
@@ -2038,8 +2030,6 @@ class Application(ttkb.Window):
         
         log_frame = ttkb.Frame(self.container_mini, padding=4)
         log_frame.pack(fill=BOTH, expand=True, padx=pad, pady=(0, pad))
-        ttkb.Label(log_frame, textvariable=self.var_online_status,
-                   anchor="w", bootstyle="secondary").pack(fill=X, pady=(0, 4))
         mini_log_bg = c["terminal_bg"]
         mini_log_fg = c["terminal_fg"]
         self.txt_mini_log = tk.Text(log_frame, state="disabled",
@@ -2086,8 +2076,6 @@ class Application(ttkb.Window):
             pill_runtime_fg  = "#4ec9b0"
             pill_device_bg   = "#1a232e"
             pill_device_fg   = "#569cd6"
-            pill_online_bg   = "#231a30"
-            pill_online_fg   = "#c586c0"
         else:
             # ═══ 浅色模式 — VS Code Light+ 风格 ═══
             clr_bg_deep     = "#f0f0f0"   # 最深底色
@@ -2118,8 +2106,6 @@ class Application(ttkb.Window):
             pill_runtime_fg  = "#008000"
             pill_device_bg   = "#e6f0ff"
             pill_device_fg   = "#0451a5"
-            pill_online_bg   = "#f3e6ff"
-            pill_online_fg   = "#7b3f9b"
 
         # 保存颜色 Token 到实例属性，供子组件使用
         self._clr = {
@@ -2133,7 +2119,6 @@ class Application(ttkb.Window):
             "terminal_bg": clr_terminal_bg, "terminal_fg": clr_terminal_fg,
             "pill_runtime_bg": pill_runtime_bg, "pill_runtime_fg": pill_runtime_fg,
             "pill_device_bg": pill_device_bg, "pill_device_fg": pill_device_fg,
-            "pill_online_bg": pill_online_bg, "pill_online_fg": pill_online_fg,
         }
 
         self.configure(bg=clr_bg)
@@ -2259,7 +2244,6 @@ class Application(ttkb.Window):
         for label_name, bg_field, fg_field in [
             ("运行", "pill_runtime_bg", "pill_runtime_fg"),
             ("设备", "pill_device_bg", "pill_device_fg"),
-            ("云端", "pill_online_bg", "pill_online_fg"),
         ]:
             pf = getattr(self, f'_pill_frame_{label_name}', None)
             _safe_cfg(pf, bg=c[bg_field])
@@ -2367,7 +2351,6 @@ class Application(ttkb.Window):
         pill_data = [
             ("运行", self.var_runtime_status, c["pill_runtime_bg"], c["pill_runtime_fg"]),
             ("设备", self.var_device_status, c["pill_device_bg"], c["pill_device_fg"]),
-            ("云端", self.var_online_status, c["pill_online_bg"], c["pill_online_fg"]),
         ]
         for label, var, pill_bg, pill_fg in pill_data:
             pf = tk.Frame(pill_frame, bg=pill_bg, bd=0, highlightthickness=0)
@@ -2771,400 +2754,11 @@ class Application(ttkb.Window):
         except Exception:
             pass
 
-    def _build_online_sources(self, relative_path):
-        relative_path = relative_path.lstrip("/")
-        raw_url = f"https://raw.githubusercontent.com/{OFFICIAL_REPO_NAME}/main/{relative_path}"
-        jsdelivr_url = f"https://cdn.jsdelivr.net/gh/{OFFICIAL_REPO_NAME}@main/{relative_path}"
-        ghproxy_url = f"https://ghproxy.cn/{raw_url}"
-        return [
-            ("GitHub Raw", raw_url),
-            ("jsDelivr", jsdelivr_url),
-            ("ghproxy", ghproxy_url),
-        ]
-
-    def _fetch_online_text(self, sources, timeout=6):
-        headers = {
-            "User-Agent": f"WOA-AutoBot/{LOCAL_VERSION}",
-            "Accept": "application/json,text/plain,text/html;q=0.9,*/*;q=0.8",
-        }
-        # PyInstaller 打包后 SSL 证书需要手动指定 certifi 路径
-        ctx_kwargs = {}
-        if getattr(sys, 'frozen', False):
-            try:
-                import certifi
-                import ssl
-                ctx_kwargs['context'] = ssl.create_default_context(cafile=certifi.where())
-            except Exception:
-                pass
-        errors = []
-        for source_name, url in sources:
-            try:
-                req = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(req, timeout=timeout, **ctx_kwargs) as resp:
-                    charset = resp.headers.get_content_charset() or "utf-8"
-                    return resp.read().decode(charset, errors="replace"), source_name, url
-            except Exception as exc:
-                errors.append(f"{source_name}: {exc}")
-        raise RuntimeError(" | ".join(errors) if errors else "未知网络错误")
-
-    def _resolve_online_validation(self):
-        manifest_sources = self._build_online_sources(ONLINE_VERSION_PATH)
-        readme_sources = self._build_online_sources("README.md")
-        repo_sources = [
-            ("GitHub", OFFICIAL_REPO_URL),
-            ("ghproxy", f"https://ghproxy.cn/{OFFICIAL_REPO_URL}"),
-        ]
-
-        manifest_error = None
-        try:
-            text, source_name, url = self._fetch_online_text(manifest_sources)
-            manifest = json.loads(text)
-            remote_version = str(manifest.get("version", "")).strip().lstrip("vV")
-            if remote_version:
-                version_cmp = _compare_version(remote_version, LOCAL_VERSION)
-                if version_cmp <= 0:
-                    return {
-                        "status": "已通过",
-                        "detail": f"官方源可达，当前已是最新版，来源 {source_name}",
-                        "message": f"在线验证通过\n\n本地版本: {LOCAL_VERSION}\n线上版本: {remote_version}\n来源: {source_name}\n地址: {url}",
-                        "remote_version": remote_version,
-                    }
-                return {
-                    "status": "发现更新",
-                    "detail": f"检测到线上版本 {remote_version}，来源 {source_name}",
-                    "message": f"检测到新版本\n\n本地版本: {LOCAL_VERSION}\n线上版本: {remote_version}\n来源: {source_name}\n地址: {url}",
-                    "remote_version": remote_version,
-                }
-        except Exception as exc:
-            manifest_error = str(exc)
-
-        try:
-            _, source_name, url = self._fetch_online_text(readme_sources)
-            return {
-                "status": "已连接",
-                "detail": f"官方仓库在线可达，当前未提供 version.json，来源 {source_name}",
-                "message": f"官方仓库可访问\n\n本地版本: {LOCAL_VERSION}\n版本清单: 未提供\n已使用 {source_name} 回退验证\n地址: {url}",
-            }
-        except Exception:
-            pass
-
-        _, source_name, url = self._fetch_online_text(repo_sources, timeout=8)
-        return {
-            "status": "已连接",
-            "detail": f"仓库主页可达，版本清单暂不可用，来源 {source_name}",
-            "message": f"已连接官方仓库主页\n\n本地版本: {LOCAL_VERSION}\n版本清单: 不可用\n仓库地址: {url}\n版本清单错误: {manifest_error or '未返回'}",
-        }
-
-    def _set_online_validation_state(self, ok, detail=""):
-        self._online_validation_ok = bool(ok)
-        if ok:
-            self._online_validation_last_ok_ts = time.time()
-            self._online_last_error = ""
-            self._online_guard_lockdown = False
-            self._online_verified_once = True
-            self.config["online_verified_once"] = True
-            self.save_config()
-        else:
-            if detail:
-                self._online_last_error = detail
-
-    def _detect_missing_guard_modules(self):
-        missing = []
-        for mod_name in REQUIRED_GUARD_MODULES:
-            try:
-                spec = importlib.util.find_spec(mod_name)
-                if spec is None:
-                    missing.append(mod_name)
-                    continue
-                module_obj = sys.modules.get(mod_name)
-                if module_obj is None:
-                    module_obj = __import__(mod_name)
-                token = str(getattr(module_obj, "WOA_FEATURE_GUARD_TOKEN", "")).strip()
-                if token != FEATURE_GUARD_TOKEN:
-                    missing.append(f"{mod_name}.guard")
-            except Exception:
-                missing.append(mod_name)
-
-        # 打包后入口以 exe 形式存在，源码模式才检查当前 py 文件。
-        if getattr(sys, "frozen", False):
-            launcher_exists = os.path.exists(os.path.abspath(sys.executable))
-        else:
-            launcher_exists = os.path.exists(os.path.abspath(__file__))
-        if not launcher_exists:
-            missing.append("gui_launcher")
-
-        # 关键功能守卫：资助入口和资源目录被删除/篡改时在严格模式触发阻断。
-        donate_fn = getattr(self, "open_donate_window", None)
-        if not callable(donate_fn):
-            missing.append("donate.entry")
-        if not isinstance(DONATE_IMAGE_CANDIDATES, dict) or not DONATE_IMAGE_CANDIDATES:
-            missing.append("donate.candidates")
-        donate_readme = get_resource_path(os.path.join("assets", "donate", "README.md"))
-        if not os.path.isfile(donate_readme):
-            missing.append("assets.donate")
-
-        # 严格模式下校验关键更新源配置，防止被改为非官方源后继续分发。
-        if str(OFFICIAL_REPO_URL).strip() != OFFICIAL_REPO_URL_EXPECTED:
-            missing.append("official.repo_url")
-        if str(OFFICIAL_REPO_NAME).strip() != OFFICIAL_REPO_NAME_EXPECTED:
-            missing.append("official.repo_name")
-        if str(ONLINE_VERSION_PATH).strip() != ONLINE_VERSION_PATH_EXPECTED:
-            missing.append("online.version_path")
-        # 兼容不同打包形态（源码/onefile/onedir）下 version.json 的落盘位置，避免误报缺失。
-        version_candidates = []
-        try:
-            version_candidates.append(get_resource_path(ONLINE_VERSION_PATH_EXPECTED))
-        except Exception:
-            pass
-        try:
-            version_candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ONLINE_VERSION_PATH_EXPECTED))
-        except Exception:
-            pass
-        try:
-            version_candidates.append(os.path.join(os.path.dirname(os.path.abspath(sys.executable)), ONLINE_VERSION_PATH_EXPECTED))
-        except Exception:
-            pass
-        try:
-            version_candidates.append(os.path.join(os.getcwd(), ONLINE_VERSION_PATH_EXPECTED))
-        except Exception:
-            pass
-        has_version_file = any(os.path.isfile(p) for p in set(version_candidates) if p)
-        if not has_version_file:
-            # 缺少本地版本清单不直接判定为篡改，交由在线验证链路继续判定可用性。
-            print(">>> [在线校验] 未在本地找到 version.json，已跳过 online.version_file 本地校验，继续使用在线源校验")
-
-        self._missing_guard_modules = sorted(set(missing))
-        self._guard_integrity_ok = len(self._missing_guard_modules) == 0
-        return self._guard_integrity_ok
-
-    def _missing_modules_text(self):
-        if not self._missing_guard_modules:
-            return ""
-        return ", ".join(self._missing_guard_modules)
-
-    def _lockdown_runtime(self, reason):
-        if self.bot:
-            self.stop_bot()
-        self._online_guard_lockdown = True
-        self.var_runtime_status.set("在线校验阻断")
-        self.var_online_status.set("阻断")
-        self.var_online_detail.set(reason)
-        for btn in [self.btn_main_start, self.btn_mini_start]:
-            try:
-                btn.configure(state="disabled", text="已阻断")
-            except Exception:
-                pass
-        print(f">>> [在线验证阻断] {reason}")
-
-    def _unlock_runtime_if_possible(self):
-        if not self._online_guard_lockdown:
-            return
-        if not self._guard_integrity_ok:
-            return
-        self._online_guard_lockdown = False
-        if not (getattr(self, 'bot', None) and self.bot.running):
-            for btn in [self.btn_main_start, self.btn_mini_start]:
-                try:
-                    btn.configure(state="normal", text="▶ 启动")
-                except Exception:
-                    pass
-
-    def _bootstrap_online_guard(self):
-        self.var_online_status.set("离线模式")
-        self.var_online_detail.set("离线模式，所有功能可用")
-        if not self._online_verified_once:
-            self.run_online_validation(silent=True)
-
-    def _enforce_online_guard(self, scene, interactive=True):
-        return True  # 离线模式，不强制在线验证
-
-    def _online_guard_tick(self):
-        pass
-
-    def _startup_online_update_check(self):
-        """仅在启动阶段执行一次联网版本检测，不执行自动下载更新。"""
-        if self._startup_update_checked or getattr(self, "_is_closing", False):
-            return
-        if self._online_validation_running:
-            self.after(1200, self._startup_online_update_check)
-            return
-        self._startup_update_checked = True
-        self.run_online_validation(silent=True, show_update_popup=True)
-
-    def run_online_validation(self, silent=False, show_update_popup=False):
-        if self._online_validation_running:
-            return
-        self._online_validation_running = True
-        self.var_online_status.set("校验中")
-        self.var_online_detail.set("正在尝试 GitHub 与国内镜像节点...")
-
-        # 总超时计时：15 秒后强制解锁，防止卡死
-        _start_ts = time.time()
-        _MAX_VALID_SEC = 15.0
-
-        def _force_release():
-            if not self._online_validation_running:
-                return
-            self._online_validation_running = False
-            self._set_online_validation_state(False)
-            self.var_online_status.set("离线模式")
-            self.var_online_detail.set("在线验证超时（15s），已跳过，不影响使用")
-            print(">>> [在线验证] 超时（15s），自动跳过")
-
-        self.after(int(_MAX_VALID_SEC * 1000), _force_release)
-
-        def _worker():
-            result = None
-            error = None
-            try:
-                result = self._resolve_online_validation()
-            except Exception as exc:
-                error = str(exc)
-
-            def _finish():
-                if not self._online_validation_running:
-                    return  # 已被超时解锁
-                self._online_validation_running = False
-                if error:
-                    self._set_online_validation_state(False, detail=error)
-                    self.var_online_status.set("离线模式")
-                    self.var_online_detail.set("在线验证失败，离线模式运行中")
-                    if self.bot and self.bot.running:
-                        self._lockdown_runtime("运行期间在线验证失败，已自动停止")
-                    if not silent:
-                        messagebox.showerror(
-                            "在线验证失败",
-                            "未能连接官方仓库。\n\n已尝试 GitHub Raw、jsDelivr 与 ghproxy。\n可在“国内网络方案”中查看建议。\n\n错误信息:\n" + error,
-                            parent=self,
-                        )
-                    return
-
-                self._set_online_validation_state(True)
-                self.var_online_status.set(result["status"])
-                self.var_online_detail.set(result["detail"])
-                self._unlock_runtime_if_possible()
-                print(f">>> [在线验证] {result['detail']}")
-                if (
-                    show_update_popup
-                    and not self._startup_update_popup_shown
-                    and result.get("status") == "发现更新"
-                ):
-                    self._startup_update_popup_shown = True
-                    remote_v = str(result.get("remote_version") or "未知")
-                    if messagebox.askyesno(
-                        "发现新版本",
-                        f"检测到新版本可用。\n\n当前版本: {LOCAL_VERSION}\n最新版本: {remote_v}\n\n是否立即打开官方仓库下载更新？",
-                        parent=self,
-                    ):
-                        self.open_official_repo()
-                if not silent:
-                    messagebox.showinfo("在线验证", result["message"], parent=self)
-
-            # 使用线程安全队列投递到主线程执行，而非直接调用 self.after(0, _finish)
-            # 从工作线程调用 self.after() 会访问 Tcl 解释器，不是线程安全的
-            self._call_main_thread(_finish)
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _startup_silent_announcement_check(self):
-        """启动时静默获取最新公告，若与本地版本不同则自动弹出公告窗口。"""
-        if getattr(self, "_is_closing", False):
-            return
-        last_hash = self.config.get("announcement_last_hash", "")
-
-        def _worker():
-            try:
-                sources = self._build_online_sources("ANNOUNCEMENT.md")
-                text, source_name, url = self._fetch_online_text(sources)
-                if not text or not text.strip():
-                    return
-                import hashlib
-                new_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-                if new_hash == last_hash:
-                    return  # 公告无变化，静默跳过
-
-                def _show():
-                    if getattr(self, "_is_closing", False):
-                        return
-                    self.config["announcement_last_hash"] = new_hash
-                    self.save_config()
-                    print(f">>> [在线公告] 检测到新公告，来源：{source_name}")
-                    # 用本地文件作为回退，但优先使用在线内容
-                    self._open_online_announcement_window()
-                self._call_main_thread(_show)
-            except Exception:
-                pass  # 静默失败，不影响正常使用
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _check_file_integrity(self):
-        """防篡改：校验核心文件完整性，发现修改则在终端输出警告。"""
-        if getattr(self, "_is_closing", False):
-            return
-
-        def _worker():
-            import hashlib
-            tampered = []
-            for rel_path, expected_fp in CORE_FILE_FINGERPRINTS.items():
-                try:
-                    abs_path = get_resource_path(rel_path)
-                    if not os.path.isfile(abs_path):
-                        # 尝试项目根目录
-                        abs_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), rel_path)
-                    if not os.path.isfile(abs_path):
-                        continue
-                    with open(abs_path, "rb") as f:
-                        actual = hashlib.sha256(f.read()).hexdigest()[:16]
-                    if actual != expected_fp:
-                        tampered.append(rel_path)
-                except Exception:
-                    pass
-
-            def _report():
-                if getattr(self, "_is_closing", False):
-                    return
-                if not tampered:
-                    print(">>> [完整性] ✅ 核心文件校验通过")
-                    return
-                print("")
-                print("╔══════════════════════════════════════════════════════════╗")
-                print("║  ⚠️  文件完整性警告 — 以下文件可能已被篡改               ║")
-                print("╚══════════════════════════════════════════════════════════╝")
-                for f in tampered:
-                    print(f"║  • {f}")
-                print("╠══════════════════════════════════════════════════════════╣")
-                print("║  如您未主动修改这些文件，请从官方仓库重新下载！          ║")
-                print("║  官方仓库：github.com/hjtr7mymht-dot/WOA_AutoBot         ║")
-                print("╚══════════════════════════════════════════════════════════╝")
-                print("")
-                self.var_online_detail.set(f"⚠️ 文件完整性警告：{len(tampered)} 个文件被修改")
-            self._call_main_thread(_report)
-
-        threading.Thread(target=_worker, daemon=True).start()
-
     def open_personal_website(self):
         webbrowser.open("https://hjtr7mymht-dot.github.io/")
 
     def open_arpa_repo(self):
         webbrowser.open(ARPA_REPO_URL)
-
-    def open_official_repo(self):
-        webbrowser.open(OFFICIAL_REPO_URL)
-
-    def show_cn_network_help(self):
-        message = (
-            "官方仓库: " + OFFICIAL_REPO_URL + "\n\n"
-            "脚本在线验证会依次尝试以下来源:\n"
-            "1. GitHub Raw\n"
-            "2. jsDelivr 镜像\n"
-            "3. ghproxy 代理\n\n"
-            "如果你处于中国特殊网络环境，建议优先按以下顺序处理:\n"
-            "1. 先点击“立即在线验证”，观察当前命中的来源。\n"
-            "2. 若 GitHub Raw 失败，脚本会自动回退到 jsDelivr 或 ghproxy。\n"
-            "3. 若三者都失败，请为系统配置代理或规则分流后再验证。\n"
-            "4. 如需人工访问仓库，可先打开官方仓库按钮，必要时通过浏览器代理访问。"
-        )
-        messagebox.showinfo("国内网络方案", message, parent=self)
 
     def _resolve_donate_image(self, pay_type):
         candidates = DONATE_IMAGE_CANDIDATES.get(pay_type, ())
@@ -3412,7 +3006,7 @@ class Application(ttkb.Window):
         header.pack(fill=X)
         ttkb.Label(header, text="📖 使用说明", font=(DEFAULT_FONT, 18, "bold"),
                    foreground=c["primary"]).pack(anchor="w")
-        ttkb.Label(header, text=f"版本 {LOCAL_VERSION} · 官方源 {OFFICIAL_REPO_NAME}",
+        ttkb.Label(header, text=f"版本 {LOCAL_VERSION}",
                    font=(DEFAULT_FONT, 9),
                    foreground=c["text_sec"]).pack(anchor="w", pady=(4, 0))
         container = ttkb.Labelframe(shell, text=" 帮助文档 ", padding=14,
@@ -3440,10 +3034,10 @@ class Application(ttkb.Window):
         self._call_main_thread(_fill)
 
     def _open_online_announcement_window(self):
-        """在线公告：先尝试从 GitHub 拉取最新 ANNOUNCEMENT.md，失败则回退到本地文件。"""
+        """公告窗口：从项目根目录读取 ANNOUNCEMENT.md 并展示。"""
         c = self._clr
         win = ttkb.Toplevel(self)
-        win.title("在线公告")
+        win.title("公告")
         win.geometry("780x680")
         win.configure(bg=c["bg"])
         win.transient(self)
@@ -3452,11 +3046,11 @@ class Application(ttkb.Window):
 
         header = ttkb.Frame(shell, padding=(12, 10))
         header.pack(fill=X)
-        ttkb.Label(header, text="📢 在线公告", font=(DEFAULT_FONT, 16, "bold"),
+        ttkb.Label(header, text="📢 公告", font=(DEFAULT_FONT, 16, "bold"),
                    foreground=c["primary"]).pack(anchor="w")
-        self._announce_status_label = ttkb.Label(header, text="正在从 GitHub 获取最新公告...",
-                                                  font=(DEFAULT_FONT, 9), foreground=c["text_sec"])
-        self._announce_status_label.pack(anchor="w", pady=(2, 0))
+        status_label = ttkb.Label(header, text="公告内容来自本地文件",
+                                  font=(DEFAULT_FONT, 9), foreground=c["text_sec"])
+        status_label.pack(anchor="w", pady=(2, 0))
 
         container = ttkb.Labelframe(shell, text=" 公告内容 ", padding=12,
                                      bootstyle="primary", style="Card.TLabelframe")
@@ -3468,58 +3062,27 @@ class Application(ttkb.Window):
         scroll = ttkb.Scrollbar(container, command=text_area.yview)
         scroll.pack(side=RIGHT, fill=Y)
         text_area.config(yscrollcommand=scroll.set)
-        text_area.insert("end", "正在从 GitHub 获取最新公告，请稍候...")
+
+        # 读取本地 ANNOUNCEMENT.md
+        try:
+            md_path = get_resource_path("ANNOUNCEMENT.md")
+            if md_path and os.path.isfile(md_path):
+                with open(md_path, "r", encoding="utf-8") as f:
+                    text_area.insert("end", f.read())
+            else:
+                fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ANNOUNCEMENT.md")
+                if os.path.isfile(fallback):
+                    with open(fallback, "r", encoding="utf-8") as f:
+                        text_area.insert("end", f.read())
+                else:
+                    text_area.insert("end", "⚠️ 无法加载公告内容。")
+        except Exception as e:
+            text_area.insert("end", f"⚠️ 加载公告失败: {e}")
+
         text_area.configure(state="disabled")
         _enable_copy_for_disabled_text(text_area)
 
         self._center_toplevel_on_parent(win)
-
-        def _load_online():
-            """后台线程：尝试在线拉取 ANNOUNCEMENT.md"""
-            content = None
-            source_label = ""
-            try:
-                sources = self._build_online_sources("ANNOUNCEMENT.md")
-                text, source_name, _ = self._fetch_online_text(sources)
-                if text and text.strip():
-                    content = text
-                    source_label = f"✅ 已获取最新公告 · 来源：{source_name}"
-            except Exception as e:
-                source_label = f"⚠️ 在线获取失败（{e}），使用本地公告"
-
-            def _update_ui():
-                try:
-                    self._announce_status_label.configure(text=source_label)
-                except Exception:
-                    pass
-                text_area.configure(state="normal")
-                text_area.delete("1.0", "end")
-                if content:
-                    text_area.insert("end", content)
-                else:
-                    # 回退到本地文件
-                    try:
-                        md_path = get_resource_path("ANNOUNCEMENT.md")
-                        if md_path and os.path.isfile(md_path):
-                            with open(md_path, "r", encoding="utf-8") as f:
-                                text_area.insert("end", f.read())
-                        else:
-                            fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ANNOUNCEMENT.md")
-                            if os.path.isfile(fallback):
-                                with open(fallback, "r", encoding="utf-8") as f:
-                                    text_area.insert("end", f.read())
-                            else:
-                                text_area.insert("end", "⚠️ 无法加载公告内容。")
-                    except Exception as e2:
-                        text_area.insert("end", f"⚠️ 加载本地公告也失败: {e2}")
-                text_area.configure(state="disabled")
-                _enable_copy_for_disabled_text(text_area)
-                win.lift()
-                win.focus_force()
-
-            self._call_main_thread(_update_ui)
-
-        threading.Thread(target=_load_online, daemon=True).start()
 
     def _open_markdown_window(self, title, md_filename, icon="📄"):
         """通用 Markdown 弹窗：从项目根目录读取 .md 文件并展示在可滚动文本区中。
@@ -3839,7 +3402,6 @@ class Application(ttkb.Window):
         if hasattr(self, 'settings_win') and self.settings_win.winfo_exists():
             self.settings_win.lift()
             return
-        if not self._enforce_online_guard("打开高级设置", interactive=True):
             return
         win = ttkb.Toplevel(self)
         self.settings_win = win
@@ -3900,18 +3462,8 @@ class Application(ttkb.Window):
         top_action_row = ttkb.Frame(body)
         top_action_row.pack(fill=X, pady=(0, 16))
 
-        online_frame = ttkb.Labelframe(body, text=" 在线验证 ", padding=16,
-                                        bootstyle="primary", style="Card.TLabelframe")
-        online_frame.pack(fill=X, pady=(0, 14))
-        ttkb.Label(online_frame, textvariable=self.var_online_detail,
-                   wraplength=480, justify="left",
-                   font=(DEFAULT_FONT, 9),
-                   foreground=c["text_sec"]).pack(anchor="w")
-        online_btn_row = ttkb.Frame(online_frame)
-        online_btn_row.pack(fill=X, pady=(8, 0))
-        ttkb.Button(online_btn_row, text="立即在线验证", bootstyle="success-outline", command=self.run_online_validation).pack(side=LEFT)
-        ttkb.Button(online_btn_row, text="国内网络方案", bootstyle="warning-outline", command=self.show_cn_network_help).pack(side=LEFT, padx=8)
-        ttkb.Button(online_btn_row, text="官方仓库", bootstyle="primary-outline", command=self.open_official_repo).pack(side=LEFT)
+        online_btn_row = ttkb.Frame(body)
+        online_btn_row.pack(fill=X, pady=(0, 14))
         ttkb.Button(online_btn_row, text="作者网站", bootstyle="info-outline", command=self.open_personal_website).pack(side=LEFT, padx=8)
         ttkb.Button(online_btn_row, text="🗺️ 路线查找", bootstyle="success-outline", command=self.open_arpa_repo).pack(side=LEFT, padx=(0, 8))
 
@@ -4640,8 +4192,6 @@ class Application(ttkb.Window):
         win.after(50, lambda: self._center_toplevel_on_parent(win))
 
     def refresh_devices(self):
-        if not self._enforce_online_guard("扫描设备", interactive=True):
-            return
         self._prepare_first_run_environment(
             force=not self.config.get("initial_device_paths_detected", False),
             reason="首次智能扫描",
@@ -4710,8 +4260,6 @@ class Application(ttkb.Window):
             print(f">>> [MuMu] 检测到 MuMu 设备，已切换至模拟器自带 ADB 以支持点击操作")
 
     def start_bot(self):
-        if not self._enforce_online_guard("启动脚本", interactive=True):
-            return
         device = self.combo_devices.get()
         if not device:
             messagebox.showwarning("提示", "请先选择设备")
@@ -4843,8 +4391,6 @@ class Application(ttkb.Window):
             print(">>> [暂停] 脚本已暂停")
 
     def on_confirm_tower_delay(self):
-        if not self._enforce_online_guard("应用挂机节奏", interactive=True):
-            return
         self.sync_all_configs_to_bot()
         val_str = self.var_delay_count.get()
         if val_str == "0":
@@ -4853,8 +4399,6 @@ class Application(ttkb.Window):
             print(f">>> [配置] 自动延时塔台: 已更新为 {val_str} 次")
 
     def on_confirm_anti_stuck(self):
-        if not self._enforce_online_guard("应用防卡死配置", interactive=True):
-            return
         try:
             threshold = int(self.var_anti_stuck_threshold.get())
             threshold = max(3, min(20, threshold))
@@ -4865,8 +4409,6 @@ class Application(ttkb.Window):
         print(f">>> [配置] 防卡死: {'已开启' if self.var_anti_stuck_enabled.get() else '已关闭'}，阈值 {threshold}")
 
     def sync_all_configs_to_bot(self, from_advanced_save=False):
-        if not from_advanced_save and not self._enforce_online_guard("同步配置", interactive=False):
-            return
         no_log = from_advanced_save
         try:
             cnt = int(self.var_delay_count.get())
