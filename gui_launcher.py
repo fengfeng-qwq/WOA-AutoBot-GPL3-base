@@ -386,6 +386,8 @@ class MultiTextRedirector(object):
         widget.tag_config("stats", foreground="#569cd6", font=(DEFAULT_FONT, 9, "bold"))
         # 赞助公告专用：金色加粗
         widget.tag_config("sponsor", foreground="#e5b800", font=(MONO_FONT, 10, "bold"))
+        # 折叠提示：灰色斜体
+        widget.tag_config("collapsed", foreground="#666666", font=(DEFAULT_FONT, 8, "italic"))
 
     def refresh_tags(self, c):
         """主题切换时更新所有 widget 的标签颜色"""
@@ -400,6 +402,8 @@ class MultiTextRedirector(object):
             widget.tag_config("stats", foreground=c["info"], font=(DEFAULT_FONT, 9, "bold"))
             # 赞助公告金色加粗
             widget.tag_config("sponsor", foreground=c["warning"], font=(MONO_FONT, 10, "bold"))
+            # 折叠提示：灰色斜体
+            widget.tag_config("collapsed", foreground=c["muted"], font=(DEFAULT_FONT, 8, "italic"))
 
     def write(self, str_val):
         if self.closing:
@@ -418,12 +422,13 @@ class MultiTextRedirector(object):
             if self._dup_count > 5:
                 return  # 连续相同消息超过5条则跳过
             if self._dup_count == 5:
-                # 插入一条折叠提示
+                # 插入一条折叠提示（独立一行）
+                now_str = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-4]
                 self._insert_to_all(
-                    f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')[:-4]}] ",
+                    f"[{now_str}] ",
                     "time",
-                    "  ... (后续重复消息已折叠)\n",
-                    "normal"
+                    "... (后续重复消息已折叠)\n",
+                    "collapsed"
                 )
                 return
         else:
@@ -3433,15 +3438,24 @@ class Application(ttkb.Window):
         canvas.pack(side=LEFT, fill=BOTH, expand=True)
         scrollbar.pack(side=RIGHT, fill=Y)
 
-        # ── 鼠标滚轮滚动（bind_all 捕获窗口内所有滚轮事件）──
+        # ── 鼠标滚轮滚动 ──
+        # Windows 会把 WM_MOUSEWHEEL 发给「持有键盘焦点」的窗口而非鼠标下的窗口，
+        # 因此不能用祖先链判断事件是否来自本窗口：焦点留在主窗口时滚轮会完全失效。
+        # 本窗口是模态窗口（grab_set），打开期间所有滚轮事件都应滚动本页面；
+        # 唯一例外是文本框内的滚轮，交给文本框自身处理。
         def _on_settings_mousewheel(event):
             try:
+                if not win.winfo_exists():
+                    return
                 w = event.widget
                 while w:
+                    if isinstance(w, tk.Text):
+                        return
                     if w == win:
-                        canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-                        return "break"
+                        break
                     w = w.master
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                return "break"
             except Exception:
                 pass
 
