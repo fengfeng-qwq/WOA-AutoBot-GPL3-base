@@ -233,25 +233,6 @@ if INSTANCE_ID is None:
 CONFIG_FILE = os.path.join(_DATA_BASE, "config.json" if INSTANCE_ID == 1 else f"config_{INSTANCE_ID}.json")
 STATS_FILE = os.path.join(_DATA_BASE, "woa_stats.csv")
 
-# 以下常量已从 core 导入，此处保留局部别名便于内部代码继续使用
-
-DONATE_IMAGE_CANDIDATES = {
-    "微信支付": (
-        os.path.join("assets", "donate", "wechat_pay.png"),
-        os.path.join("assets", "donate", "wechat_pay.jpg"),
-        os.path.join("assets", "donate", "wechat_pay.jpeg"),
-        os.path.join("assets", "donate", "wechat_pay.webp"),
-        os.path.join("assets", "donate", "wechat.png"),
-    ),
-    "支付宝": (
-        os.path.join("assets", "donate", "alipay_pay.png"),
-        os.path.join("assets", "donate", "alipay_pay.jpg"),
-        os.path.join("assets", "donate", "alipay_pay.jpeg"),
-        os.path.join("assets", "donate", "alipay_pay.webp"),
-        os.path.join("assets", "donate", "alipay.png"),
-    ),
-}
-
 
 def _version_tuple(version):
     parts = []
@@ -2723,11 +2704,6 @@ class Application(ttkb.Window):
         ttkb.Entry(adb_frame, textvariable=self.var_public_adb_targets, width=34,
                    font=(DEFAULT_FONT, 9)).pack(side=LEFT, padx=4, fill=X, expand=True)
 
-        # [Tab 5] 自愿资助
-        tab5 = ttkb.Frame(notebook, padding=(10, 8))
-        notebook.add(tab5, text=" 赞助 ")
-        self._setup_donate_tab(tab5)
-
     def _do_initial_scan(self):
         """首次设备扫描（主线程同步执行，避免 PyInstaller 冻结环境下 GIL 崩溃）"""
         self.var_device_status.set("扫描中")
@@ -2765,148 +2741,6 @@ class Application(ttkb.Window):
 
     def open_arpa_repo(self):
         webbrowser.open(ARPA_REPO_URL)
-
-    def _resolve_donate_image(self, pay_type):
-        candidates = DONATE_IMAGE_CANDIDATES.get(pay_type, ())
-        fallback_rel = candidates[0] if candidates else ""
-        for rel_path in candidates:
-            abs_path = get_resource_path(rel_path)
-            if os.path.isfile(abs_path):
-                return abs_path, rel_path
-        return "", fallback_rel
-
-    def _load_donate_photo(self, image_path, max_width=330, max_height=520):
-        with Image.open(image_path) as img:
-            img.load()
-            src_w, src_h = img.size
-            if src_w <= 0 or src_h <= 0:
-                raise ValueError("无效图片尺寸")
-            scale = min(max_width / float(src_w), max_height / float(src_h), 1.0)
-            new_w = max(1, int(src_w * scale))
-            new_h = max(1, int(src_h * scale))
-            if hasattr(Image, "Resampling"):
-                resample = Image.Resampling.LANCZOS
-            else:
-                resample = Image.LANCZOS
-            resized = img.resize((new_w, new_h), resample)
-            return ImageTk.PhotoImage(resized)
-
-    def _setup_donate_tab(self, parent):
-        """在主界面「资助」tab 中嵌入收款码。"""
-        c = self._clr
-        header = ttkb.Frame(parent)
-        header.pack(fill=X, pady=(0, 10))
-        ttkb.Label(header, text="☕ 自愿资助作者", font=(DEFAULT_FONT, 14, "bold"),
-                   foreground=c["primary"]).pack(side=LEFT)
-        ttkb.Label(header, text="完全自愿，无任何功能限制",
-                   font=(DEFAULT_FONT, 9),
-                   foreground=c["text_sec"]).pack(side=LEFT, padx=(12, 0))
-
-        sub_nb = ttkb.Notebook(parent, bootstyle="primary")
-        sub_nb.pack(fill=BOTH, expand=True)
-
-        self._donate_tab_refs = []
-        for pay_type in ("微信支付", "支付宝"):
-            sub_frame = ttkb.Frame(sub_nb, padding=12)
-            sub_nb.add(sub_frame, text=f"  {pay_type}  ")
-
-            abs_path, expected_rel = self._resolve_donate_image(pay_type)
-            if abs_path:
-                try:
-                    photo = self._load_donate_photo(abs_path, max_width=250, max_height=380)
-                    lbl = ttkb.Label(sub_frame, image=photo)
-                    lbl.image = photo
-                    lbl.pack(fill=BOTH, expand=True)
-                    self._donate_tab_refs.append(photo)
-                    ttkb.Label(sub_frame, text=os.path.basename(abs_path),
-                               font=(DEFAULT_FONT, 8),
-                               foreground=c["muted"]).pack(pady=(6, 0))
-                except Exception as exc:
-                    ttkb.Label(sub_frame, text=f"图片加载失败: {exc}",
-                               bootstyle="danger").pack(fill=BOTH, expand=True)
-            else:
-                ttkb.Label(sub_frame,
-                    text=f"未找到收款码图片\n请将图片放到: {expected_rel}",
-                    bootstyle="warning", justify="center").pack(fill=BOTH, expand=True)
-
-    def open_donate_window(self):
-        donate_win = getattr(self, "donate_win", None)
-        if donate_win and donate_win.winfo_exists():
-            donate_win.lift()
-            donate_win.focus_force()
-            return
-
-        parent = self
-        if hasattr(self, "settings_win"):
-            try:
-                if self.settings_win.winfo_exists():
-                    parent = self.settings_win
-            except tk.TclError:
-                pass
-        win = ttkb.Toplevel(self)
-        self.donate_win = win
-        win.title("❤️ 自愿资助")
-        win.geometry("860x760")
-        win.minsize(760, 620)
-        c = self._clr
-        win.configure(bg=c["surface"])
-        win.transient(parent)
-        win.grab_set()
-
-        outer = ttkb.Frame(win, padding=24)
-        outer.pack(fill=BOTH, expand=True)
-        ttkb.Label(outer, text="☕ 自愿资助作者", font=(DEFAULT_FONT, 20, "bold"),
-                   foreground=c["primary"]).pack(anchor="w")
-        ttkb.Label(outer,
-            text="完全自愿，无任何功能限制 — 您的支持帮助我们持续维护这个项目",
-            font=(DEFAULT_FONT, 10),
-            foreground=c["text_sec"],
-        ).pack(anchor="w", pady=(6, 20))
-
-        cards = ttkb.Frame(outer)
-        cards.pack(fill=BOTH, expand=True)
-        cards.grid_columnconfigure(0, weight=1, uniform="donate_cols")
-        cards.grid_columnconfigure(1, weight=1, uniform="donate_cols")
-
-        self._donate_image_refs = []
-        for idx, pay_type in enumerate(("微信支付", "支付宝")):
-            card = ttkb.Labelframe(cards, text=f"  {pay_type}  ", padding=14,
-                                    bootstyle="primary", style="Card.TLabelframe")
-            card.grid(row=0, column=idx, sticky="nsew", padx=(0, 10) if idx == 0 else (10, 0))
-
-            abs_path, expected_rel = self._resolve_donate_image(pay_type)
-            if abs_path:
-                try:
-                    photo = self._load_donate_photo(abs_path)
-                    img_label = ttkb.Label(card, image=photo)
-                    img_label.image = photo
-                    img_label.pack(fill=BOTH, expand=True)
-                    self._donate_image_refs.append(photo)
-                    ttkb.Label(card,
-                        text=f"已加载: {os.path.basename(abs_path)}",
-                        font=(DEFAULT_FONT, 8),
-                        foreground=c["muted"]).pack(anchor="w", pady=(8, 0))
-                except Exception as exc:
-                    ttkb.Label(card, text=f"图片加载失败: {exc}",
-                               bootstyle="danger").pack(anchor="w", pady=(8, 0))
-            else:
-                ttkb.Label(card,
-                    text=f"未找到收款码图片。\n请将图片放到: {expected_rel}",
-                    justify="left", bootstyle="warning",
-                ).pack(fill=BOTH, expand=True)
-
-        ttkb.Label(outer,
-            text="提示: 高级设置中点击「自愿资助」按钮时才会显示本窗口。",
-            font=(DEFAULT_FONT, 9),
-            foreground=c["text_sec"],
-        ).pack(anchor="w", pady=(16, 10))
-
-        action_row = ttkb.Frame(outer)
-        action_row.pack(fill=X)
-        ttkb.Button(action_row, text="关闭", bootstyle="secondary-outline",
-                    command=win.destroy, width=10).pack(side=RIGHT)
-
-        win.after(50, lambda: self._center_toplevel_on_parent(win))
 
     def _center_toplevel_on_parent(self, win):
         """将子窗口居中于主窗口"""
