@@ -35,9 +35,90 @@ class WoaBot:
         self.last_seen_main_interface_time = time.time()
         self.last_periodic_check_time = 0.0
         while self.paused and self.running:
+            # 「离开游戏自动暂停」触发时，在等待循环里继续探测前台，回到游戏自动恢复
+            if self._leave_pause_active and self.enable_leave_auto_pause:
+                self._check_game_foreground()
             time.sleep(0.15)
         if not self.running:
             raise StopSignal()
+
+    def _get_foreground_package(self):
+        """执行 adb dumpsys window 并解析 mCurrentFocus 的前台包名。
+
+        返回值：
+        - None  → adb 命令失败（设备可能离线）
+        - ""    → 无法解析包名（窗口切换过渡帧等）
+        - 其他  → 前台包名
+        """
+        result = self.adb.run_cmd(["shell", "dumpsys", "window"], timeout=6)
+        if result is None or getattr(result, "returncode", 1) != 0:
+            return None
+        try:
+            out = result.stdout.decode("utf-8", "ignore")
+        except Exception:
+            return None
+        pkgs = []
+        for line in out.splitlines():
+            idx = line.find("mCurrentFocus")
+            if idx < 0:
+                continue
+            start = line.find("{", idx)
+            end = line.find("}", start) if start >= 0 else -1
+            if start < 0 or end < 0:
+                continue
+            # 形如 "1a2b3c4 u0 com.haugland.woa/.MainActivity"，取 pkg/ 前缀
+            for part in line[start + 1:end].split():
+                slash = part.find("/")
+                if slash > 0:
+                    pkgs.append(part[:slash])
+                    break
+        if self.GAME_PACKAGE in pkgs:
+            return self.GAME_PACKAGE
+        return pkgs[0] if pkgs else ""
+
+    def _check_game_foreground(self):
+        """每 2 秒检测一次前台包名；连续 3 次不在游戏则自动暂停，回到游戏自动恢复。"""
+        if not self.adb:
+            return
+        now = time.time()
+        if now < self._fg_check_next_time:
+            return
+        self._fg_check_next_time = now + 2.0
+        pkg = self._get_foreground_package()
+        if pkg is None or pkg == "":
+            # 命令失败或过渡帧：不做强判定，计数缓慢衰减避免误停
+            self._fg_miss_count = max(0, self._fg_miss_count - 1)
+            return
+        if pkg == self.GAME_PACKAGE:
+            self._fg_miss_count = 0
+            if self._leave_pause_active:
+                self._leave_pause_active = False
+                if self.paused:
+                    self.log("▶️ [前台检测] 已回到游戏，自动恢复运行")
+                    self.resume()
+                    if self.config_callback:
+                        self.config_callback("paused", False)
+        else:
+            self._fg_miss_count += 1
+            if self._fg_miss_count >= 3 and not self.paused:
+                self._leave_pause_active = True
+                self.log(f"⏸️ [前台检测] 前台应用为 {pkg}，不是游戏，已自动暂停（回到游戏后自动恢复）")
+                self.pause()
+                if self.config_callback:
+                    self.config_callback("paused", True)
+
+    def set_leave_auto_pause(self, enabled):
+        enabled = bool(enabled)
+        if self.enable_leave_auto_pause == enabled:
+            return
+        self.enable_leave_auto_pause = enabled
+        self.log(f">>> [配置] 离开游戏自动暂停: {'已开启' if enabled else '已关闭'}")
+        if not enabled and self._leave_pause_active:
+            self._leave_pause_active = False
+            if self.paused:
+                self.resume()
+                if self.config_callback:
+                    self.config_callback("paused", False)
 
     def __init__(self, log_callback=None, config_callback=None, instance_id=1):
         self.instance_id = instance_id
@@ -72,6 +153,12 @@ class WoaBot:
         self.enable_skip_staff = False
         self.enable_delay_bribe = False
         self.enable_random_task = False
+        # 离开游戏自动暂停：通过 adb dumpsys window 检测前台包名
+        self.GAME_PACKAGE = "com.haugland.woa"
+        self.enable_leave_auto_pause = False
+        self._leave_pause_active = False
+        self._fg_check_next_time = 0.0
+        self._fg_miss_count = 0
         self.control_method = "adb"
         self.screenshot_method = "nemu_ipc"
         self.mumu_path = ""
@@ -1742,6 +1829,7 @@ class WoaBot:
         if not self.paused:
             return
         self.paused = False
+        self._leave_pause_active = False
         # 重置界面检测计时，防止暂停期间累计的"未检测到主界面"触发防卡死
         self.last_seen_main_interface_time = time.time()
         self.last_periodic_check_time = 0.0
@@ -1892,6 +1980,10 @@ class WoaBot:
             try:
                 # ── 暂停检查（最高优先级）──
                 self._check_paused()
+
+                # ── 离开游戏自动暂停：前台包名检测（内部 2s 节流）──
+                if self.enable_leave_auto_pause:
+                    self._check_game_foreground()
                 
                 if self._handle_server_error_popup():
                     idle_count = 0

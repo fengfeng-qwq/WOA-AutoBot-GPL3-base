@@ -739,6 +739,7 @@ class Application(ttkb.Window):
         self.var_2d_mode = tk.BooleanVar(value=self.config.get("2d_mode", True))
         self.var_anti_stuck_enabled = tk.BooleanVar(value=self.config.get("anti_stuck_enabled", True))
         self.var_anti_stuck_threshold = tk.StringVar(value=str(self.config.get("anti_stuck_threshold", 6)))
+        self.var_leave_auto_pause = tk.BooleanVar(value=bool(self.config.get("leave_auto_pause", False)))
         self.var_notify_enabled = tk.BooleanVar(value=bool(self.config.get("mobile_notify_enabled", False)))
         self.var_notify_provider = tk.StringVar(value=str(self.config.get("mobile_notify_provider", "wecom")))
         self.var_notify_webhook = tk.StringVar(value=str(self.config.get("mobile_notify_webhook", "")))
@@ -3667,6 +3668,16 @@ class Application(ttkb.Window):
         self.create_info_icon(f_probe, "连接当前设备并检测触控/截图方案可用性；不可用时会自动回退到可用组合。")\
             .pack(side=LEFT, padx=6)
 
+        f_leave_pause = ttkb.Frame(tab_device_right)
+        f_leave_pause.pack(fill=X, pady=5)
+        ttkb.Checkbutton(f_leave_pause, text="离开游戏自动暂停", variable=self.var_leave_auto_pause,
+                         command=lambda: self._toggle_functional_switch("离开游戏自动暂停", self.var_leave_auto_pause),
+                         bootstyle="success-round-toggle").pack(side=LEFT)
+        self.create_info_icon(
+            f_leave_pause,
+            "ADB检测包名为com.haugland.woa是否在前台运行，否则暂停，支持自动恢复",
+        ).pack(side=LEFT, padx=5)
+
         ttkb.Separator(tab_runtime_left).pack(fill=X, pady=2)
         ttkb.Label(tab_runtime_left, text="速度优化（风险选项）", font=("bold")).pack(anchor="w")
         f_speed_row = ttkb.Frame(tab_runtime_left)
@@ -3922,6 +3933,7 @@ class Application(ttkb.Window):
             self.config["cancel_stand_filter"] = self.var_cancel_stand_filter.get()
             self.config["random_task_order"] = self.var_random_task.get()
             self.config["anti_stuck_enabled"] = self.var_anti_stuck_enabled.get()
+            self.config["leave_auto_pause"] = bool(self.var_leave_auto_pause.get())
             notify_provider = "dingtalk" if provider_combo.current() == 1 else "wecom"
             notify_webhook = e_notify_webhook.get().strip()
             notify_keyword = e_notify_keyword.get().strip()
@@ -3993,6 +4005,8 @@ class Application(ttkb.Window):
                 changed.append(("塔台关闭筛选全部飞机", "开" if self.config.get("cancel_stand_filter") else "关"))
             if old_cfg.get("anti_stuck_enabled") != self.config.get("anti_stuck_enabled"):
                 changed.append(("防卡死", "开" if self.config.get("anti_stuck_enabled") else "关"))
+            if old_cfg.get("leave_auto_pause") != self.config.get("leave_auto_pause"):
+                changed.append(("离开游戏自动暂停", "开" if self.config.get("leave_auto_pause") else "关"))
             if old_cfg.get("anti_stuck_threshold") != self.config.get("anti_stuck_threshold"):
                 changed.append(("防卡死触发阈值", str(self.config.get("anti_stuck_threshold", 6))))
             if old_cfg.get("mobile_notify_enabled") != self.config.get("mobile_notify_enabled"):
@@ -4279,6 +4293,7 @@ class Application(ttkb.Window):
         self.var_anti_stuck_threshold.set(str(anti_stuck_threshold))
         self.config["anti_stuck_enabled"] = self.var_anti_stuck_enabled.get()
         self.config["anti_stuck_threshold"] = anti_stuck_threshold
+        self.config["leave_auto_pause"] = bool(self.var_leave_auto_pause.get())
         self.save_config()
         if self.bot:
             self.bot.set_bonus_staff_feature(self.var_bonus_staff.get())
@@ -4303,6 +4318,7 @@ class Application(ttkb.Window):
                 self.var_category_processing.get(),
                 selection={c["key"]: self.var_category_selection[c["key"]].get() for c in SIDEBAR_CATEGORIES})
             self.bot.set_anti_stuck_config(self.var_anti_stuck_enabled.get(), anti_stuck_threshold, log_change=not no_log)
+            self.bot.set_leave_auto_pause(self.var_leave_auto_pause.get())
             self.bot.set_control_method(self.config.get("control_method", "adb"))
             self.bot.set_screenshot_method(self.config.get("screenshot_method", "nemu_ipc"))
             self.bot.set_mumu_path(self.config.get("mumu_path", ""))
@@ -4318,6 +4334,14 @@ class Application(ttkb.Window):
                 self.var_delay_count.set(str(value))
             elif key == "vehicle_buy":
                 self.var_vehicle_buy.set(bool(value))
+            elif key == "paused":
+                # 前台包名检测触发的自动暂停/恢复 → 同步 GUI 暂停按钮状态
+                paused_now = bool(value)
+                if self.var_paused.get() != paused_now:
+                    self.var_paused.set(paused_now)
+                    self.var_runtime_status.set("已暂停" if paused_now else "运行中")
+                    for btn in [self.btn_main_pause, self.btn_mini_pause]:
+                        btn.configure(text="▶  继 续" if paused_now else "⏸  暂 停")
             elif key == "mumu_path":
                 self.config["mumu_path"] = value
                 self.save_config()
