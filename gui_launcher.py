@@ -60,7 +60,6 @@ from core import (
     get_resource_path, get_bundled_resource_path, ICON_DIR,
     get_woa_debug_dir,
     LOCAL_VERSION, MAX_INSTANCES,
-    ARPA_REPO_URL,
     SIDEBAR_CATEGORIES,
     DEFAULT_FONT, MONO_FONT, MUMU_PORTS,
 )
@@ -2778,12 +2777,6 @@ class Application(ttkb.Window):
             self._update_mini_device_display()
         except Exception:
             pass
-
-    def open_personal_website(self):
-        webbrowser.open("https://hjtr7mymht-dot.github.io/")
-
-    def open_arpa_repo(self):
-        webbrowser.open(ARPA_REPO_URL)
 
     def _center_toplevel_on_parent(self, win):
         """将子窗口居中于主窗口"""
