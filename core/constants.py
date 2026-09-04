@@ -7,11 +7,10 @@ from core.platform import IS_WINDOWS, IS_MAC
 
 # ─── 版本与仓库 ──────────────────────────────────────────
 LOCAL_VERSION = "1.5.2"
-OFFICIAL_REPO_URL = "https://github.com/hjtr7mymht-dot/WOA_AutoBot"
-OFFICIAL_REPO_NAME = "hjtr7mymht-dot/WOA_AutoBot"
+OFFICIAL_REPO_URL = "https://github.com/fengfeng-qwq/WOA-AutoBot-GPL3-base"
+OFFICIAL_REPO_NAME = "fengfeng-qwq/WOA-AutoBot-GPL3-base"
 ONLINE_VERSION_PATH = "version.json"
-ARPA_REPO_URL = "https://github.com/hjtr7mymht-dot/ARPA-FOR-WOA"
-ARPA_REPO_NAME = "hjtr7mymht-dot/ARPA-FOR-WOA"
+
 
 # ─── 右侧类别栏按钮（图像识别 + 坐标回退） ─────────────
 # 所有坐标以 1600×900 归一化分辨率为基准（REF_WIDTH × REF_HEIGHT）
