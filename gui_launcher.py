@@ -142,11 +142,13 @@ def _enable_copy_for_disabled_text(text_widget):
 
 # === 多实例支持 ===
 def _cleanup_dead_locks():
-    """清理所有残留的死锁文件（不会影响正在运行的实例）。
-    使用 'r+' 模式检测锁，避免 'w' 模式截断活跃实例的锁文件。"""
+    """清理已崩溃实例残留的 instance_*.lock（不影响正在运行的实例）。
+
+    注意：不处理 woa_stats.csv.lock / config.json.lock —— 它们是写入时的
+    会合文件，每次正常保存后都会以"无人持有"状态留在原地，属于正常现象；
+    周期性删除它们只会反复刷屏，且存在与写入方竞争互斥失效的微小风险。"""
     import glob
     cleaned = 0
-    # 清理 instance_*.lock（仅处理死锁）
     for lock_path in glob.glob(os.path.join(_DATA_BASE, "instance_*.lock")):
         try:
             _try_acquire_and_cleanup_lock(lock_path)
@@ -158,21 +160,8 @@ def _cleanup_dead_locks():
                 cleaned += 1
             except Exception:
                 pass
-    # 清理 CSV 锁
-    for lock_name in ("woa_stats.csv.lock", "config.json.lock"):
-        lock_path = os.path.join(_DATA_BASE, lock_name)
-        try:
-            _try_acquire_and_cleanup_lock(lock_path)
-            if not os.path.exists(lock_path):
-                cleaned += 1
-        except Exception:
-            try:
-                os.remove(lock_path)
-                cleaned += 1
-            except Exception:
-                pass
     if cleaned > 0:
-        print(f">>> [清理] 已清除 {cleaned} 个残留锁文件")
+        print(f">>> [清理] 已清除 {cleaned} 个崩溃实例的残留锁文件")
 
 
 def _try_acquire_and_cleanup_lock(lock_path):
@@ -394,13 +383,17 @@ class MultiTextRedirector(object):
             self._insert_to_all("\n", "normal")
             return
 
-        # 连续重复消息去重：超过阈值后跳过，避免刷屏阻塞 GUI
+        # 连续重复消息去重：仅折叠 5 秒内的快速刷屏；
+        # 间隔较久的相同消息（如 10 分钟一次的周期日志）各自正常显示
         if not hasattr(self, '_last_write_str'):
             self._last_write_str = None
             self._dup_count = 0
-        if str_val == self._last_write_str:
+            self._last_write_ts = 0.0
+        now_ts = time.time()
+        if str_val == self._last_write_str and (now_ts - self._last_write_ts) < 5.0:
             self._dup_count += 1
             if self._dup_count > 5:
+                self._last_write_ts = now_ts
                 return  # 连续相同消息超过5条则跳过
             if self._dup_count == 5:
                 # 插入一条折叠提示（独立一行）
@@ -411,10 +404,12 @@ class MultiTextRedirector(object):
                     "... (后续重复消息已折叠)\n",
                     "collapsed"
                 )
+                self._last_write_ts = now_ts
                 return
         else:
             self._last_write_str = str_val
             self._dup_count = 0
+        self._last_write_ts = now_ts
 
         now_str = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-4]
         time_prefix = f"[{now_str}] "
