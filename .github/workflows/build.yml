@@ -10,11 +10,12 @@
 name: Build & Release
 
 on:
-  push:
-    branches: [main, master]
-    tags: ['v*']
-  pull_request:
-    branches: [main, master]
+#  push:
+#    branches: [main, master]
+#    tags: ['v*']
+#  pull_request:
+#    branches: [main, master]
+# 1. 关闭自动构建：注释掉 push 和 pull_request，仅保留手动触发 (workflow_dispatch)
   workflow_dispatch:
     inputs:
       create_release:
