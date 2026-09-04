@@ -46,6 +46,7 @@ if hasattr(tk, 'Misc') and hasattr(tk.Misc, '__getattr__'):
 import subprocess
 import time
 import webbrowser
+import urllib.request
 import adb_controller as adb_mod
 from tkinter import filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
@@ -221,6 +222,29 @@ if INSTANCE_ID is None:
 # 按实例隔离配置和统计文件
 CONFIG_FILE = os.path.join(_DATA_BASE, "config.json" if INSTANCE_ID == 1 else f"config_{INSTANCE_ID}.json")
 STATS_FILE = os.path.join(_DATA_BASE, "woa_stats.csv")
+
+# 在线公告源：GitHub Raw 主源，jsDelivr CDN 镜像备源；全部失败则回退本地 ANNOUNCEMENT.md
+ANNOUNCEMENT_ONLINE_URLS = (
+    "https://raw.githubusercontent.com/fengfeng-qwq/WOA-AutoBot-GPL3-base/main/ANNOUNCEMENT.md",
+    "https://fastly.jsdelivr.net/gh/fengfeng-qwq/WOA-AutoBot-GPL3-base@main/ANNOUNCEMENT.md",
+)
+
+
+def _announcement_ssl_contexts():
+    """公告拉取依次尝试的 SSL 上下文：系统证书 → certifi。
+
+    仅使用证书校验，绝不降级为非验证请求（避免中间人攻击）。全部失败时由
+    调用方回退到本地公告，符合"连不上 GitHub 就用本地公告"的设计。"""
+    import ssl
+    try:
+        yield ssl.create_default_context()
+    except Exception:
+        pass
+    try:
+        import certifi
+        yield ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        pass
 
 
 def _version_tuple(version):
@@ -2922,7 +2946,7 @@ class Application(ttkb.Window):
         scroll.pack(side=RIGHT, fill=Y)
         text_area.config(yscrollcommand=scroll.set)
 
-        # 读取本地 ANNOUNCEMENT.md
+        # 先读取本地 ANNOUNCEMENT.md 立即展示，随后后台尝试 GitHub 在线公告
         try:
             md_path = get_resource_path("ANNOUNCEMENT.md")
             if md_path and os.path.isfile(md_path):
@@ -2941,7 +2965,67 @@ class Application(ttkb.Window):
         text_area.configure(state="disabled")
         _enable_copy_for_disabled_text(text_area)
 
+        status_label.configure(text="正在获取 GitHub 在线公告…（当前显示本地内容）")
+        self._fetch_announcement_online(status_label, text_area)
+
         self._center_toplevel_on_parent(win)
+
+    def _apply_announcement_text(self, text_area, status_label, content, source_note):
+        """在主线程将公告内容替换为在线版本并更新来源标注。"""
+        try:
+            if not text_area.winfo_exists():
+                return
+            text_area.configure(state="normal")
+            text_area.delete("1.0", END)
+            text_area.insert("end", content)
+            text_area.configure(state="disabled")
+            text_area.see("1.0")
+            if status_label.winfo_exists():
+                status_label.configure(text=source_note)
+        except Exception:
+            pass
+
+    def _fetch_announcement_online(self, status_label, text_area):
+        """后台拉取 GitHub 在线公告；成功替换窗口内容，失败保持本地公告。
+
+        结果缓存 60 秒，避免频繁打开窗口时重复请求。"""
+        cached = getattr(self, "_announcement_online_cache", None)
+        if cached and (time.time() - cached[0]) < 60.0:
+            self._apply_announcement_text(text_area, status_label, cached[1],
+                                          "🌐 公告内容来自 GitHub 在线版")
+            return
+
+        def _worker():
+            text = None
+            for url in ANNOUNCEMENT_ONLINE_URLS:
+                fetched = False
+                for ctx in _announcement_ssl_contexts():
+                    try:
+                        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 WOA-AutoBot"})
+                        with urllib.request.urlopen(req, timeout=6, context=ctx) as resp:
+                            candidate = resp.read().decode("utf-8", "replace").strip()
+                        if candidate:
+                            text = candidate
+                            fetched = True
+                            break
+                    except Exception:
+                        continue
+                if fetched:
+                    break
+            if text:
+                self._announcement_online_cache = (time.time(), text)
+                self._call_main_thread(lambda: self._apply_announcement_text(
+                    text_area, status_label, text, "🌐 公告内容来自 GitHub 在线版"))
+            else:
+                def _stayed_local():
+                    try:
+                        if status_label.winfo_exists():
+                            status_label.configure(text="⚠️ 无法连接 GitHub，使用本地公告")
+                    except Exception:
+                        pass
+                self._call_main_thread(_stayed_local)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _open_markdown_window(self, title, md_filename, icon="📄"):
         """通用 Markdown 弹窗：从项目根目录读取 .md 文件并展示在可滚动文本区中。
