@@ -764,6 +764,7 @@ class Application(ttkb.Window):
         ):
             self.config.pop(legacy_key, None)
         self.var_mini_top = tk.BooleanVar(value=False)
+        self.var_mini_device = tk.StringVar(value="未连接设备")
         self.var_runtime_status = tk.StringVar(value="待命")
         self.var_device_status = tk.StringVar(value="等待扫描设备")
         self.var_system_status = tk.StringVar(value="环境检查中")
@@ -1968,6 +1969,7 @@ class Application(ttkb.Window):
             self.attributes('-topmost', self.var_mini_top.get())
             self.container_mini.pack(fill=BOTH, expand=True)
             self.is_mini_mode = True
+            self._update_mini_device_display()
 
     def toggle_mini_top_state(self):
         if self.is_mini_mode:
@@ -2018,7 +2020,7 @@ class Application(ttkb.Window):
         self.btn_mini_pause.pack(fill=X)
         
         log_frame = ttkb.Frame(self.container_mini, padding=4)
-        log_frame.pack(fill=BOTH, expand=True, padx=pad, pady=(0, pad))
+        log_frame.pack(fill=BOTH, expand=True, padx=pad, pady=(0, 0))
         mini_log_bg = c["terminal_bg"]
         mini_log_fg = c["terminal_fg"]
         self.txt_mini_log = tk.Text(log_frame, state="disabled",
@@ -2026,6 +2028,25 @@ class Application(ttkb.Window):
                                     relief="flat", height=4)
         self.txt_mini_log.pack(fill=BOTH, expand=True)
         self.redirector.add_widget(self.txt_mini_log)
+
+        dev_row = ttkb.Frame(self.container_mini, padding=4)
+        dev_row.pack(fill=X, padx=pad, pady=(2, pad))
+        ttkb.Label(dev_row, text="📱", font=(DEFAULT_FONT, 8)).pack(side=LEFT)
+        ttkb.Label(dev_row, textvariable=self.var_mini_device,
+                   font=(MONO_FONT, 8), bootstyle="secondary").pack(side=LEFT, padx=(3, 0))
+        self._update_mini_device_display()
+
+    def _update_mini_device_display(self):
+        """刷新小窗底部设备显示：运行中优先显示 bot 连接的设备，否则显示下拉框选中项。"""
+        try:
+            dev = ""
+            if self.bot and getattr(self.bot, "running", False):
+                dev = str(getattr(self.bot, "target_device", "") or "").strip()
+            if not dev:
+                dev = str(self.combo_devices.get() or "").strip()
+            self.var_mini_device.set(dev if dev else "未连接设备")
+        except Exception:
+            pass
 
     # ─── 主题色彩系统 — 安静专业风格 (Refined Aviation) ───
     # 遵循 Impeccable 设计规范：暗色模式不纯黑、强调色低饱和度、
@@ -2376,6 +2397,7 @@ class Application(ttkb.Window):
                    bootstyle="secondary").pack(side=LEFT, padx=(0, 8))
         self.combo_devices = ttkb.Combobox(ctrl_left, state="readonly", width=30, font=(DEFAULT_FONT, 10))
         self.combo_devices.pack(side=LEFT, padx=(0, 8))
+        self.combo_devices.bind("<<ComboboxSelected>>", lambda e: self._update_mini_device_display())
         self.btn_scan = ttkb.Button(ctrl_left, text="🔄 刷新设备", bootstyle="outline-info",
                                      command=self.refresh_devices, width=10, padding=(6, 3))
         self.btn_scan.pack(side=LEFT, padx=(0, 12))
@@ -2729,6 +2751,7 @@ class Application(ttkb.Window):
             else:
                 self.var_device_status.set("未发现设备")
                 print(">>> 扫描完成: 未发现设备")
+            self._update_mini_device_display()
         except Exception:
             pass
 
@@ -4098,6 +4121,7 @@ class Application(ttkb.Window):
             else:
                 self.var_device_status.set("未发现设备")
                 print(">>> 扫描完成: 未发现设备")
+            self._update_mini_device_display()
 
         self._bg_worker.submit(_scan, args=(_public_targets_raw,), callback=_on_scan_done)
 
@@ -4151,6 +4175,7 @@ class Application(ttkb.Window):
             self.combo_devices.configure(state="disabled")
 
             self.bot.start()
+            self._update_mini_device_display()
             self._stats_report_anchor_ts = time.time()
             self._runtime_start_time = time.time()
             self.var_runtime_duration.set("00:00:00")
@@ -4203,6 +4228,7 @@ class Application(ttkb.Window):
         self._stats_report_anchor_ts = 0.0
         self._runtime_start_time = None
         self.bot = None
+        self._update_mini_device_display()
         self.var_runtime_status.set("已停止")
         self.var_approach.set("0")
         self.var_depart.set("0")
@@ -4342,6 +4368,7 @@ class Application(ttkb.Window):
                 self.save_config()
             elif key == "bot_stopped":
                 self.bot = None
+                self._update_mini_device_display()
                 self.var_runtime_status.set("已停止")
                 for btn in [self.btn_main_start, self.btn_mini_start]:
                     btn.configure(state="normal", text="▶ 启动")
