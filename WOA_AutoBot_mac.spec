@@ -63,7 +63,6 @@ a = Analysis(
         'lxml', 'lxml.etree',
         # 网络请求与通知
         'requests', 'urllib3',
-        'pystray',
         # SSL
         'certifi', 'ssl',
         # 项目内部模块
@@ -72,7 +71,7 @@ a = Analysis(
         'woa_debug', 'emulator_discovery',
         'core', 'core.constants', 'core.platform',
         'core.resources', 'core.debug',
-        'bot', 'bot.config', 'bot.tower', 'bot.filter',
+        'bot', 'bot.config', 'bot.tower',
     ],
     hookspath=[],
     hooksconfig={},

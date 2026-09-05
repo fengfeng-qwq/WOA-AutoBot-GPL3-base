@@ -246,25 +246,6 @@ def _announcement_ssl_contexts():
         pass
 
 
-def _version_tuple(version):
-    parts = []
-    for part in str(version or "").strip().lstrip("vV").split("."):
-        digits = "".join(ch for ch in part if ch.isdigit())
-        parts.append(int(digits or 0))
-    while len(parts) < 4:
-        parts.append(0)
-    return tuple(parts[:4])
-
-
-def _compare_version(left, right):
-    lt = _version_tuple(left)
-    rt = _version_tuple(right)
-    if lt > rt:
-        return 1
-    if lt < rt:
-        return -1
-    return 0
-
 def _write_crash_report(exc_type, exc_value, exc_traceback):
     """写入崩溃报告文件，返回文件路径。任何阶段出错都不抛异常。"""
     crash_log_path = None

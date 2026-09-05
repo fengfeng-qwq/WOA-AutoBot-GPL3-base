@@ -2020,7 +2020,7 @@ class WoaBot:
         import gc
         gc.collect()
 
-    def _show_sponsor_notice(self, hours=0):
+    def _show_startup_banner(self):
         """输出醒目公告（GUI 终端自动渲染为金色加粗，跨平台兼容）。"""
         W = 58  # 框内宽度（两个 ║ 之间的字符数）
         B = lambda s: f"║{s:<{W}}║"  # 左对齐自动补齐到 W 宽度
@@ -2185,7 +2185,7 @@ class WoaBot:
         # 每小时醒目公告定时器（首次启动后 1 小时触发）
         self._next_hourly_notice_time = time.time() + 3600.0
         # 启动时显示赞助公告
-        self._show_sponsor_notice(0)
+        self._show_startup_banner()
         if self.enable_no_takeoff_mode:
             self._no_takeoff_cycle_side = 'landing'
             self._no_takeoff_cycle_next_switch_time = time.time() + self._no_takeoff_switch_interval
