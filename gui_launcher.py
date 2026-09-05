@@ -2719,7 +2719,7 @@ class Application(ttkb.Window):
                    "应用", self.on_confirm_tower_delay, "0=关闭延时，最大144次")
         _entry_row(tab2, "延时档位：", self.var_auto_delay_units,
                    "应用", self.on_confirm_delay_units,
-                   "单位=10分钟，0=跟随游戏滑条记忆；无上限，拖动时不超过游戏最大2小时")
+                   "单位=10分钟，0=跟随游戏滑条记忆；超出单次上限(2小时)自动连续续延")
         _section_label(tab2, "挂机策略", "info")
         _toggle(tab2, "🛩️ 不起飞模式", self.var_no_takeoff_mode,
                 "只处理降落+停机位，不处理起飞\n4号塔台单开时自动在待降落/停机位间轮切")

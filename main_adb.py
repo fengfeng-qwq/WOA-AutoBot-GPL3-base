@@ -3005,9 +3005,10 @@ class WoaBot:
                      else f"   🗼 ⚠️ 滑条未能定位到 {minutes}m，按游戏记忆档延长")
         return False
 
-    def _do_delay_all(self):
+    def _do_delay_all(self, target_minutes=None):
         """点击「全部激活」按钮并确认延时弹窗（含二次确认）。返回 True/False。
-        流程：全部激活 → 一次确认(delay/delay_1) → 二次确认(yes.png@715,546)"""
+        流程：全部激活 → 一次确认(delay/delay_1) → 二次确认(yes.png@715,546)
+        target_minutes：延时档位目标（分钟），>0 时点「延长」前先把持续时间滑条拖到该档位。"""
         self.log("   🗼 点击「全部激活」按钮")
         self.adb.click(*self.TOWER_DELAY_ALL_BTN)
         self.sleep(0.5)
@@ -3023,8 +3024,8 @@ class WoaBot:
                     pos = self._locate_on_screen(btn, screen, confidence=0.75)
                     if pos:
                         # 弹窗已出现：先按延时档位拖持续时间滑条，再点「延长」
-                        if self.auto_delay_units > 0:
-                            self._set_delay_slider(self.auto_delay_units * 10)
+                        if target_minutes:
+                            self._set_delay_slider(target_minutes)
                         self.adb.click(pos[0], pos[1], random_offset=2)
                         first_ok = True
                         break
@@ -3100,10 +3101,25 @@ class WoaBot:
                 return True
         return False
 
+    def _is_tower_menu_open(self):
+        """ROI 内检测 tower_1.png 判断塔台菜单是否打开。"""
+        screen = self.adb.get_screenshot()
+        if screen is None:
+            return False
+        tpl = self.adb._read_image_safe(self.icon_path + 'tower_1.png')
+        if tpl is None:
+            return False
+        import cv2
+        res = cv2.matchTemplate(screen[271:327, 32:90], tpl, cv2.TM_CCOEFF_NORMED)
+        return float(cv2.minMaxLoc(res)[1]) >= 0.8
+
     def _perform_tower_delay(self, menu_already_open=False):
-        """执行塔台延时：打开菜单(如需) → 点击「全部激活」→ 确认 → OCR 验证。
+        """执行塔台延时：打开菜单(如需) → 「全部激活」→ 确认 → OCR 验证。
         失败时最多关窗重试 2 次。
-        menu_already_open=True 时假设菜单已打开、无需关窗重开。"""
+        menu_already_open=True 时假设菜单已打开、无需关窗重开。
+        设了延时档位（auto_delay_units>0）时按累加制连续续延：
+        每次操作最多拖 120 分钟（游戏滑条上限），直到档位额度用完；
+        整轮只消耗 1 次延时次数，银币按实际延长量支付。"""
         self.log(f"🗼 [塔台] 开始延时操作，菜单已打开: {menu_already_open}")
         # 确保菜单打开
         if not menu_already_open:
@@ -3114,39 +3130,59 @@ class WoaBot:
                 self._tower_delay_deadline = time.time() + 30
                 return
 
-        pre_times = self._read_tower_times(open_menu=False)
-        self.log(f"🗼 [塔台] 延时前时间: {pre_times}")
+        total_min = self.auto_delay_units * 10 if self.auto_delay_units > 0 else 0
+        applied_min = 0
+        ok = False
+        max_ops = 8 if total_min else 1  # 单事件续延轮次防呆上限（8 轮 = 最多 16 小时）
+        for op in range(max_ops):
+            target = min(total_min - applied_min, 120) if total_min else None
+            if op > 0 and not self._is_tower_menu_open():
+                if not self._open_tower_menu():
+                    self.log("🗼 [塔台] ⚠️ 续延时重开菜单失败，按已完成额度结算")
+                    break
+            pre_times = self._read_tower_times(open_menu=False)
+            self.log(f"🗼 [塔台] 延时前时间: {pre_times}")
 
-        # 主流程：点击全部激活 → 确认 → OCR 验证
-        ok = self._do_delay_all()
-        if not ok:
-            ok = self._check_delay_by_ocr(pre_times)
-
-        # 重试：关窗后重新点击（最多 2 次）
-        for retry in range(2):
-            if ok:
-                break
-            self.log(f"🗼 [塔台] ⚠️ 延时未确认，关窗重试 ({retry+1}/2)...")
-            self.close_window()
-            self.sleep(0.5)
-            ok = self._do_delay_all()
+            ok = self._do_delay_all(target)
             if not ok:
                 ok = self._check_delay_by_ocr(pre_times)
 
-        # 重试失败：退回主界面，重新打开菜单（1 次）
-        if not ok:
-            self.log("🗼 [塔台] ⚠️ 关窗重试仍失败，退回主界面后重开菜单...")
-            self.close_window()
-            self.sleep(0.3)
-            self.wait_and_click('back.png', timeout=3.0, click_wait=0.5, random_offset=2)
-            self.sleep(0.5)
-            if self._open_tower_menu():
-                ok = self._do_delay_all()
+            # 重试：关窗后重新点击（最多 2 次）
+            for retry in range(2):
+                if ok:
+                    break
+                self.log(f"🗼 [塔台] ⚠️ 延时未确认，关窗重试 ({retry+1}/2)...")
+                self.close_window()
+                self.sleep(0.5)
+                ok = self._do_delay_all(target)
                 if not ok:
                     ok = self._check_delay_by_ocr(pre_times)
 
-        # 延时后处理
-        if ok:
+            # 重试失败：退回主界面，重新打开菜单（1 次）
+            if not ok:
+                self.log("🗼 [塔台] ⚠️ 关窗重试仍失败，退回主界面后重开菜单...")
+                self.close_window()
+                self.sleep(0.3)
+                self.wait_and_click('back.png', timeout=3.0, click_wait=0.5, random_offset=2)
+                self.sleep(0.5)
+                if self._open_tower_menu():
+                    ok = self._do_delay_all(target)
+                    if not ok:
+                        ok = self._check_delay_by_ocr(pre_times)
+            if not ok:
+                break
+            if not total_min:
+                break
+            applied_min += target
+            if applied_min >= total_min:
+                break
+            self.log(f"🗼 [塔台] 累加制续延中: {applied_min}/{total_min} 分钟，继续下一轮...")
+        else:
+            if applied_min < total_min:
+                self.log(f"🗼 [塔台] ⚠️ 达到单事件续延轮次上限，本轮共延长 {applied_min} 分钟，剩余由下次延时继续")
+
+        # 延时后处理（轮内多轮续延整轮只计 1 次延时次数）
+        if ok or applied_min > 0:
             self.auto_delay_count -= 1
             if self.config_callback:
                 self.config_callback("auto_delay_count", self.auto_delay_count)
