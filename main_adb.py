@@ -150,6 +150,30 @@ class WoaBot:
             minutes = 5
         self.route_back_minutes = max(0, min(120, minutes))
 
+    def set_error_restart(self, enabled, threshold=10, window_min=5):
+        enabled = bool(enabled)
+        try:
+            threshold = int(threshold)
+        except (TypeError, ValueError):
+            threshold = 10
+        threshold = max(2, min(30, threshold))
+        try:
+            window_min = int(window_min)
+        except (TypeError, ValueError):
+            window_min = 5
+        window_min = max(1, min(60, window_min))
+        if (self.enable_error_restart == enabled and self.error_restart_threshold == threshold
+                and self.error_restart_window_min == window_min):
+            return
+        self.enable_error_restart = enabled
+        self.error_restart_threshold = threshold
+        self.error_restart_window_min = window_min
+        if not enabled:
+            self._server_error_count = 0
+            self._server_error_window_start = 0.0
+        self.log(f">>> [配置] 错误频繁自动重启游戏: {'已开启' if enabled else '已关闭'}"
+                 f"（{window_min} 分钟内 {threshold} 次）")
+
     def _check_route_interface(self):
         """主循环内每 1.5s 检测一次：玩家打开航线管理界面则暂停自动化。
 
@@ -327,6 +351,15 @@ class WoaBot:
         self.ROUTE_DOCK_THRESHOLD = 0.85
         self.ROUTE_BACK_X = 59
         self.ROUTE_BACK_Y = 55
+        # 服务器错误频繁自动重启：窗口时间内错误弹窗达到阈值则重启游戏（默认关闭）
+        self.enable_error_restart = False
+        self.error_restart_threshold = 10
+        self.error_restart_window_min = 5
+        self._server_error_count = 0
+        self._server_error_window_start = 0.0
+        # 重启流程锚点 ROI（逻辑分辨率 1600x900）：标题页开始 / 机场选择页开始
+        self.GAME_START_ROI = (640, 770, 320, 120)
+        self.AIRPORT_START_ROI = (20, 760, 420, 130)
         self.control_method = "adb"
         self.screenshot_method = "nemu_ipc"
         self.mumu_path = ""
@@ -2552,6 +2585,9 @@ class WoaBot:
         if not ok_pos:
             return False
 
+        if self.enable_error_restart:
+            if self._count_server_error():
+                return True  # 已触发游戏重启，弹窗随进程消失，无需再点
         self.log("⚠️ [异常弹窗] 检测到服务器错误弹窗，正在点击“好的”关闭...")
         for _ in range(3):
             self.adb.click(ok_pos[0], ok_pos[1], random_offset=8)
@@ -2563,6 +2599,111 @@ class WoaBot:
                 return True
             ok_pos = next_ok
         self.log("⚠️ [异常弹窗] 尝试关闭失败，将在后续循环继续处理")
+        return True
+
+    def _count_server_error(self):
+        """错误弹窗计数：窗口时间内累计，达到阈值触发一次游戏重启。
+        返回 True 表示本轮已触发重启。"""
+        now = time.time()
+        if now - self._server_error_window_start > self.error_restart_window_min * 60:
+            self._server_error_window_start = now
+            self._server_error_count = 0
+        self._server_error_count += 1
+        self.log(f"⚠️ [异常弹窗] {self.error_restart_window_min} 分钟内第 {self._server_error_count}/{self.error_restart_threshold} 次服务器错误")
+        if self._server_error_count >= self.error_restart_threshold:
+            self._server_error_count = 0
+            self._server_error_window_start = 0.0
+            self._restart_game()
+            return True
+        return False
+
+    def _force_stop_game(self):
+        """force-stop 后重新拉起游戏。返回 True 表示启动命令已发出。"""
+        try:
+            r = self.adb.run_cmd(["shell", "am", "force-stop", self.GAME_PACKAGE], timeout=15)
+            if r is None or getattr(r, "returncode", 1) != 0:
+                return False
+            self.sleep(2.0)
+            r = self.adb.run_cmd(["shell", "monkey", "-p", self.GAME_PACKAGE,
+                                  "-c", "android.intent.category.LAUNCHER", "1"], timeout=20)
+            return r is not None and getattr(r, "returncode", 1) == 0
+        except Exception as e:
+            self.log(f"🚨 [自动重启] 启动命令异常: {e}")
+            return False
+
+    def _wait_for_template(self, template_name, region, timeout_sec, threshold=0.8):
+        """轮询截图等待模板出现，返回命中位置 (x, y)；超时返回 None。"""
+        t0 = time.time()
+        while time.time() - t0 < timeout_sec:
+            if not self.running or self.paused:
+                return None
+            screen = self.adb.get_screenshot_cached(max_age_ms=200)
+            if screen is not None:
+                pos = self._locate_on_screen(template_name, screen, confidence=threshold, region=region)
+                if pos:
+                    return pos
+            time.sleep(1.0)
+        return None
+
+    def _click_and_wait_next(self, click_tpl, click_region, next_tpl, next_region,
+                             next_threshold=0.8, max_clicks=5, per_wait=15, log_name=""):
+        """点击按钮并等待下一页锚点出现；冷启动后游戏可能吞掉前几次点击，未出现则重点击。"""
+        for attempt in range(1, max_clicks + 1):
+            if not self.running or self.paused:
+                return False
+            screen = self.adb.get_screenshot_cached(max_age_ms=200)
+            pos = None
+            if screen is not None:
+                pos = self._locate_on_screen(click_tpl, screen, confidence=0.8, region=click_region)
+            if pos:
+                if attempt > 1:
+                    self.log(f"🔄 [自动重启] {log_name}第 {attempt} 次点击...")
+                self.adb.click(pos[0], pos[1], random_offset=4)
+            else:
+                self.log(f"🚨 [自动重启] 未找到按钮 {click_tpl}（第 {attempt}/{max_clicks} 次）")
+            t0 = time.time()
+            while time.time() - t0 < per_wait:
+                if not self.running or self.paused:
+                    return False
+                s = self.adb.get_screenshot_cached(max_age_ms=200)
+                if s is not None and self._locate_on_screen(next_tpl, s, confidence=next_threshold, region=next_region):
+                    return True
+                time.sleep(1.0)
+        self.log(f"🚨 [自动重启] {max_clicks} 次点击后仍未等到下一页锚点")
+        return False
+
+    def _restart_game(self):
+        """自动重启游戏：force-stop → 标题页「开始」→ 机场选择页「开始」→ 主界面。
+
+        每一步之间响应暂停/停止；任一步失败则中止，交由主循环状态机自行归位。"""
+        self.log("🚨 [自动重启] 服务器错误频繁，开始自动重启游戏（全程约 1-2 分钟）...")
+        if not self._force_stop_game():
+            self.log("🚨 [自动重启] force-stop/拉起失败，放弃本轮重启")
+            return False
+        if not self._wait_for_template("game_start.png", self.GAME_START_ROI, 120):
+            self.log("🚨 [自动重启] 未检测到游戏标题页（120s），重试一次 force-stop")
+            if not self._force_stop_game():
+                return False
+            if not self._wait_for_template("game_start.png", self.GAME_START_ROI, 60):
+                self.log("🚨 [自动重启] 重试后仍未检测到标题页，放弃本轮重启")
+                return False
+        self.log("🎮 [自动重启] 已到标题页，点击「开始」...")
+        if not self._click_and_wait_next("game_start.png", self.GAME_START_ROI,
+                                         "airport_start.png", self.AIRPORT_START_ROI,
+                                         log_name="标题页「开始」"):
+            return False
+        if not self.running or self.paused:
+            return False
+        self.log("🎮 [自动重启] 已选择机场，点击「开始」进场...")
+        if not self._click_and_wait_next("airport_start.png", self.AIRPORT_START_ROI,
+                                         "main_dock_tower.png", self.ROUTE_DOCK_ROI,
+                                         next_threshold=0.85, per_wait=20, log_name="机场「开始」"):
+            return False
+        # 重启完成后复位防卡死计时，让主循环重新接管
+        self.last_seen_main_interface_time = time.time()
+        self.last_periodic_check_time = 0.0
+        self.last_window_close_time = time.time()
+        self.log("✅ [自动重启] 游戏已重启并回到主界面，恢复自动化")
         return True
 
     def _open_tower_menu(self, fast=False, budget_start=None, budget_sec=None):

@@ -760,6 +760,9 @@ class Application(ttkb.Window):
         self.var_leave_auto_pause = tk.BooleanVar(value=bool(self.config.get("leave_auto_pause", False)))
         self.var_route_pause = tk.BooleanVar(value=bool(self.config.get("route_auto_pause", False)))
         self.var_route_back_minutes = tk.StringVar(value=str(self.config.get("route_back_minutes", 5)))
+        self.var_error_restart = tk.BooleanVar(value=bool(self.config.get("error_restart_enabled", False)))
+        self.var_error_restart_threshold = tk.StringVar(value=str(self.config.get("error_restart_threshold", 10)))
+        self.var_error_restart_window = tk.StringVar(value=str(self.config.get("error_restart_window_min", 5)))
         self.var_notify_enabled = tk.BooleanVar(value=bool(self.config.get("mobile_notify_enabled", False)))
         self.var_notify_provider = tk.StringVar(value=str(self.config.get("mobile_notify_provider", "wecom")))
         self.var_notify_webhook = tk.StringVar(value=str(self.config.get("mobile_notify_webhook", "")))
@@ -3792,6 +3795,25 @@ class Application(ttkb.Window):
         e_route_back.pack(side=LEFT, padx=5)
         ttkb.Label(f_route_back, text="分钟，0=不启用（范围 0-120）", bootstyle="secondary").pack(side=LEFT)
 
+        f_error_restart = ttkb.Frame(tab_device_right)
+        f_error_restart.pack(fill=X, pady=5)
+        ttkb.Checkbutton(f_error_restart, text="错误频繁自动重启游戏", variable=self.var_error_restart,
+                         command=lambda: self._toggle_functional_switch("错误频繁自动重启游戏", self.var_error_restart),
+                         bootstyle="success-round-toggle").pack(side=LEFT)
+        f_error_params = ttkb.Frame(tab_device_right)
+        f_error_params.pack(fill=X, pady=(0, 5), padx=(24, 0))
+        ttkb.Label(f_error_params, text="阈值:").pack(side=LEFT)
+        e_error_threshold = ttkb.Entry(f_error_params, textvariable=self.var_error_restart_threshold, width=4)
+        e_error_threshold.pack(side=LEFT, padx=5)
+        ttkb.Label(f_error_params, text="次 /").pack(side=LEFT)
+        e_error_window = ttkb.Entry(f_error_params, textvariable=self.var_error_restart_window, width=4)
+        e_error_window.pack(side=LEFT, padx=5)
+        ttkb.Label(f_error_params, text="分钟（次数 2-30，分钟 1-60，默认关）", bootstyle="secondary").pack(side=LEFT)
+        self.create_info_icon(
+            f_error_restart,
+            "游戏内错误弹窗（好的按钮）在设定时间内达到设定次数时，自动重启游戏并重新进场（约1-2分钟）",
+        ).pack(side=LEFT, padx=5)
+
         ttkb.Separator(tab_runtime_left).pack(fill=X, pady=2)
         ttkb.Label(tab_runtime_left, text="速度优化（风险选项）", font=("bold")).pack(anchor="w")
         f_speed_row = ttkb.Frame(tab_runtime_left)
@@ -4054,6 +4076,17 @@ class Application(ttkb.Window):
             except (TypeError, ValueError):
                 route_back_minutes = 5
             self.config["route_back_minutes"] = max(0, min(120, route_back_minutes))
+            self.config["error_restart_enabled"] = bool(self.var_error_restart.get())
+            try:
+                error_threshold = int(self.var_error_restart_threshold.get())
+            except (TypeError, ValueError):
+                error_threshold = 10
+            self.config["error_restart_threshold"] = max(2, min(30, error_threshold))
+            try:
+                error_window = int(self.var_error_restart_window.get())
+            except (TypeError, ValueError):
+                error_window = 5
+            self.config["error_restart_window_min"] = max(1, min(60, error_window))
             notify_provider = "dingtalk" if provider_combo.current() == 1 else "wecom"
             notify_webhook = e_notify_webhook.get().strip()
             notify_keyword = e_notify_keyword.get().strip()
@@ -4131,6 +4164,12 @@ class Application(ttkb.Window):
                 changed.append(("航线管理界面自动暂停", "开" if self.config.get("route_auto_pause") else "关"))
             if old_cfg.get("route_back_minutes") != self.config.get("route_back_minutes"):
                 changed.append(("航线页无操作自动返回", f"{self.config.get('route_back_minutes', 5)} 分钟"))
+            if old_cfg.get("error_restart_enabled") != self.config.get("error_restart_enabled"):
+                changed.append(("错误频繁自动重启游戏", "开" if self.config.get("error_restart_enabled") else "关"))
+            if old_cfg.get("error_restart_threshold") != self.config.get("error_restart_threshold"):
+                changed.append(("自动重启阈值", f"{self.config.get('error_restart_threshold', 10)} 次"))
+            if old_cfg.get("error_restart_window_min") != self.config.get("error_restart_window_min"):
+                changed.append(("自动重启时间窗口", f"{self.config.get('error_restart_window_min', 5)} 分钟"))
             if old_cfg.get("anti_stuck_threshold") != self.config.get("anti_stuck_threshold"):
                 changed.append(("防卡死触发阈值", str(self.config.get("anti_stuck_threshold", 6))))
             if old_cfg.get("mobile_notify_enabled") != self.config.get("mobile_notify_enabled"):
@@ -4489,6 +4528,21 @@ class Application(ttkb.Window):
         route_back_minutes = max(0, min(120, route_back_minutes))
         self.config["route_back_minutes"] = route_back_minutes
         self.var_route_back_minutes.set(str(route_back_minutes))
+        self.config["error_restart_enabled"] = bool(self.var_error_restart.get())
+        try:
+            error_threshold = int(self.var_error_restart_threshold.get())
+        except (TypeError, ValueError):
+            error_threshold = 10
+        error_threshold = max(2, min(30, error_threshold))
+        self.config["error_restart_threshold"] = error_threshold
+        self.var_error_restart_threshold.set(str(error_threshold))
+        try:
+            error_window = int(self.var_error_restart_window.get())
+        except (TypeError, ValueError):
+            error_window = 5
+        error_window = max(1, min(60, error_window))
+        self.config["error_restart_window_min"] = error_window
+        self.var_error_restart_window.set(str(error_window))
         self.save_config()
         if self.bot:
             self.bot.set_bonus_staff_feature(self.var_bonus_staff.get())
@@ -4516,6 +4570,7 @@ class Application(ttkb.Window):
             self.bot.set_leave_auto_pause(self.var_leave_auto_pause.get())
             self.bot.set_route_pause(self.var_route_pause.get())
             self.bot.set_route_back_minutes(route_back_minutes)
+            self.bot.set_error_restart(self.var_error_restart.get(), error_threshold, error_window)
             self.bot.set_control_method(self.config.get("control_method", "adb"))
             self.bot.set_screenshot_method(self.config.get("screenshot_method", "nemu_ipc"))
             self.bot.set_mumu_path(self.config.get("mumu_path", ""))
