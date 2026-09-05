@@ -742,6 +742,7 @@ class Application(ttkb.Window):
         self.var_skip_staff = tk.BooleanVar(value=self.config.get("skip_staff", False))
         self.var_delay_bribe = tk.BooleanVar(value=self.config.get("delay_bribe", False))
         self.var_delay_count = tk.StringVar(value=str(self.config.get("auto_delay_count", 0)))
+        self.var_auto_delay_units = tk.StringVar(value=str(self.config.get("auto_delay_units", 0)))
         self.var_random_task = tk.BooleanVar(value=self.config.get("random_task_order", True))
         self.var_no_takeoff_mode = tk.BooleanVar(value=self.config.get("no_takeoff_mode", False))
         legacy_logout_interval = self.config.get("standalone_logout_interval")
@@ -1361,6 +1362,10 @@ class Application(ttkb.Window):
             self.config["auto_delay_count"] = int(self.var_delay_count.get())
         except (ValueError, TypeError):
             self.config["auto_delay_count"] = 0
+        try:
+            self.config["auto_delay_units"] = max(0, int(self.var_auto_delay_units.get()))
+        except (ValueError, TypeError):
+            self.config["auto_delay_units"] = 0
         try:
             anti_stuck_threshold = int(self.var_anti_stuck_threshold.get())
             anti_stuck_threshold = max(3, min(20, anti_stuck_threshold))
@@ -2712,6 +2717,9 @@ class Application(ttkb.Window):
         _section_label(tab2, "塔台自动延时")
         _entry_row(tab2, "延时控制器：", self.var_delay_count,
                    "应用", self.on_confirm_tower_delay, "0=关闭延时，最大144次")
+        _entry_row(tab2, "延时档位：", self.var_auto_delay_units,
+                   "应用", self.on_confirm_delay_units,
+                   "单位=10分钟，0=跟随游戏滑条记忆；无上限，拖动时不超过游戏最大2小时")
         _section_label(tab2, "挂机策略", "info")
         _toggle(tab2, "🛩️ 不起飞模式", self.var_no_takeoff_mode,
                 "只处理降落+停机位，不处理起飞\n4号塔台单开时自动在待降落/停机位间轮切")
@@ -4488,6 +4496,19 @@ class Application(ttkb.Window):
         else:
             print(f">>> [配置] 自动延时塔台: 已更新为 {val_str} 次")
 
+    def on_confirm_delay_units(self):
+        try:
+            units = int(self.var_auto_delay_units.get())
+        except ValueError:
+            units = 0
+        units = max(0, units)
+        self.var_auto_delay_units.set(str(units))
+        self.sync_all_configs_to_bot()
+        if units == 0:
+            print(">>> [配置] 延时档位: 跟随游戏滑条记忆")
+        else:
+            print(f">>> [配置] 延时档位: 每次延长 {units * 10} 分钟")
+
     def on_confirm_anti_stuck(self):
         try:
             threshold = int(self.var_anti_stuck_threshold.get())
@@ -4510,6 +4531,13 @@ class Application(ttkb.Window):
             cnt = self.config.get("auto_delay_count", 0)
         self.var_delay_count.set(str(cnt))
         self.config["auto_delay_count"] = cnt
+        try:
+            delay_units = int(self.var_auto_delay_units.get())
+        except ValueError:
+            delay_units = int(self.config.get("auto_delay_units", 0))
+        delay_units = max(0, delay_units)
+        self.var_auto_delay_units.set(str(delay_units))
+        self.config["auto_delay_units"] = delay_units
         try:
             anti_stuck_threshold = int(self.var_anti_stuck_threshold.get())
             anti_stuck_threshold = max(3, min(20, anti_stuck_threshold))
@@ -4551,6 +4579,7 @@ class Application(ttkb.Window):
             self.bot.set_skip_staff_verify(self.var_skip_staff.get())
             self.bot.set_delay_bribe(self.var_delay_bribe.get())
             self.bot.set_auto_delay(cnt)
+            self.bot.set_auto_delay_units(delay_units)
             self.bot.set_random_task_mode(self.var_random_task.get(), log_change=not no_log)
             self.bot.set_slide_duration_range(
                 self.config.get("slide_min", 250), self.config.get("slide_max", 500), log_change=not no_log)

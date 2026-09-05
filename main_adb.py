@@ -418,6 +418,13 @@ class WoaBot:
         self._tower_active_slots = [False, False, False, False]
         # 塔台是否已确认关闭（全部未开启）
         self._tower_disabled = False
+        # 延时档位：>0 时延时前把持续时间滑条拖到 N×10 分钟（0=跟随游戏记忆的上次位置）
+        self.auto_delay_units = 0
+        # 延时弹窗持续时间滑条几何参数（逻辑分辨率 1600x900，实机实测）
+        self.DELAY_SLIDER_TRACK_X = (493, 1000)
+        self.DELAY_SLIDER_Y = 719
+        self.DELAY_SLIDER_KNOB_ROI = (460, 685, 580, 70)
+        self.DELAY_DURATION_OCR_REGION = (455, 638, 280, 44)
         # 塔台图标 ROI 区域 (x, y, w, h)
         self.TOWER_ICON_ROI = (549, 794, 53, 55)
         # 塔台是否曾经开启过（用于"塔台关闭筛选全部"功能）
@@ -1575,6 +1582,21 @@ class WoaBot:
         elif old_count > 0 and count <= 0:
             self.log(f">>> [配置] 自动延时塔台已关闭")
             self._tower_delay_deadline = 0.0
+
+    def set_auto_delay_units(self, units):
+        """延时档位（单位=10分钟）：0=跟随游戏滑条记忆，>0 每次延时拖到 N×10 分钟。"""
+        try:
+            units = int(units)
+        except (TypeError, ValueError):
+            units = 0
+        units = max(0, units)
+        if self.auto_delay_units == units:
+            return
+        self.auto_delay_units = units
+        if units > 0:
+            self.log(f">>> [配置] 延时档位: 每次延长 {units * 10} 分钟")
+        else:
+            self.log(f">>> [配置] 延时档位: 跟随游戏滑条记忆")
 
     def set_delay_bribe(self, enabled):
         if self.enable_delay_bribe == enabled: return
@@ -2938,6 +2960,51 @@ class WoaBot:
 
     # ========== 塔台延时：全部激活策略 ==========
 
+    def _find_slider_knob(self):
+        """在持续时间滑条 ROI 内找绿色滑钮，返回逻辑坐标 (x, y)；找不到返回 (None, None)。"""
+        import numpy as np
+        screen = self.adb.get_screenshot()
+        if screen is None:
+            return None, None
+        x0, y0, w, h = self.DELAY_SLIDER_KNOB_ROI
+        zone = screen[y0:y0 + h, x0:x0 + w]
+        g, r, b = zone[:, :, 1].astype(int), zone[:, :, 2].astype(int), zone[:, :, 0].astype(int)
+        ys, xs = ((g > 140) & (g > r * 1.2) & (g > b * 1.2)).nonzero()
+        if len(ys) < 20:
+            return None, None
+        return x0 + int(xs.mean()), y0 + int(ys.mean())
+
+    def _set_delay_slider(self, minutes):
+        """把持续时间滑条拖到 minutes 分钟（游戏物理上限 120 分钟，超过按上限处理）。
+
+        慢拖 1200ms（快滑会被滑条弹回），OCR 读「持续时间」校验，
+        偏差超一档自动微调一次；仍失败则按游戏滑条记忆档延长（仅日志提示）。
+        返回 True 表示滑条已定位到目标档位。"""
+        minutes = max(10, min(120, int(minutes)))
+        x_left, x_right = self.DELAY_SLIDER_TRACK_X
+        y = self.DELAY_SLIDER_Y
+        target_x = int(x_left + (minutes - 10) / 110.0 * (x_right - x_left))
+        tdx, tdy = self.adb._logical_to_device_point(target_x, y)
+        for attempt in (1, 2):
+            kx, ky = self._find_slider_knob()
+            if kx is None:
+                self.log("   🗼 ⚠️ 未找到持续时间滑条绿钮，按游戏记忆档延长")
+                return False
+            start = max(x_left, min(x_right, kx))
+            sdx, sdy = self.adb._logical_to_device_point(start, ky)
+            self.adb.run_cmd(["shell", "input", "swipe",
+                              str(sdx), str(sdy), str(tdx), str(tdy), "1200"], timeout=10)
+            self.sleep(0.8)
+            text = self.ocr.recognize_number(self.DELAY_DURATION_OCR_REGION, mode='task',
+                                             screen_image=self.adb.get_screenshot())
+            secs = self.ocr.parse_tower_time(text) if text else None
+            if secs is not None and abs(secs - minutes * 60) <= 300:
+                self.log(f"   🗼 持续时间已设为 {minutes} 分钟")
+                return True
+            self.log(f"   🗼 滑条校验偏差 (期望 {minutes}m, 实际 {secs}s)，微调重试..." if attempt == 1
+                     else f"   🗼 ⚠️ 滑条未能定位到 {minutes}m，按游戏记忆档延长")
+        return False
+
     def _do_delay_all(self):
         """点击「全部激活」按钮并确认延时弹窗（含二次确认）。返回 True/False。
         流程：全部激活 → 一次确认(delay/delay_1) → 二次确认(yes.png@715,546)"""
@@ -2950,10 +3017,17 @@ class WoaBot:
         first_ok = False
         while time.time() - t0 < 6.0:
             self._check_running()
-            for btn in ('delay.png', 'delay_1.png'):
-                if self.wait_and_click(btn, timeout=0.5, click_wait=0.3, random_offset=2):
-                    first_ok = True
-                    break
+            screen = self.adb.get_screenshot()
+            if screen is not None:
+                for btn in ('delay.png', 'delay_1.png'):
+                    pos = self._locate_on_screen(btn, screen, confidence=0.75)
+                    if pos:
+                        # 弹窗已出现：先按延时档位拖持续时间滑条，再点「延长」
+                        if self.auto_delay_units > 0:
+                            self._set_delay_slider(self.auto_delay_units * 10)
+                        self.adb.click(pos[0], pos[1], random_offset=2)
+                        first_ok = True
+                        break
             if first_ok:
                 break
             self.sleep(0.15)
