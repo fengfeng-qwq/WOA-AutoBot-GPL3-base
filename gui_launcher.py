@@ -4139,10 +4139,70 @@ class Application(ttkb.Window):
             self.sync_all_configs_to_bot(from_advanced_save=True)
             win.destroy()
 
+        # 这四个数值框没有就近的「确定」按钮，回车即保存
+        for _num_entry in (e_min, e_max, e_click_jitter, e_swipe_jitter):
+            _num_entry.bind("<Return>", lambda _ev: save())
+
         ttkb.Button(top_action_row, text="💾 保存设置", bootstyle="success", width=18, padding=(8, 4), command=save).pack(side=LEFT)
         ttkb.Button(top_action_row, text="📊 统计图表", bootstyle="info-outline", width=18, padding=(8, 4),
                 command=self._open_stats_chart).pack(side=LEFT, padx=(12, 0))
         ttkb.Separator(body, bootstyle="primary").pack(fill=X, pady=12)
+
+        # ── 底部保存行 + 未保存修改守护 ──
+        # 内容区可滚动而「保存设置」在顶部：滚到下方改完数值后保存按钮已不可见，
+        # 直接关窗会静默丢弃修改，故此处补一份就近入口并在关窗时拦截。
+        _INPUT_CLASSES = ("TEntry", "Entry", "TSpinbox", "Spinbox", "TCombobox", "Text")
+
+        def _value_of(w):
+            try:
+                return w.get("1.0", "end-1c") if w.winfo_class() == "Text" else w.get()
+            except Exception:
+                return None
+
+        _baseline = {}
+        _stack = [win]
+        while _stack:
+            _w = _stack.pop()
+            _stack.extend(_w.winfo_children())
+            if _w.winfo_class() in _INPUT_CLASSES:
+                _baseline[str(_w)] = _value_of(_w)
+        _touched = set()
+
+        def _mark_touched(ev):
+            # tkinter 每次遍历都会新建控件包装对象，只能按路径名识别
+            if str(ev.widget) in _baseline:
+                _touched.add(str(ev.widget))
+
+        # 只认用户亲手改过的控件：程序回填输入框（扫描设备、路径探测等）不算未保存修改
+        win.bind("<KeyRelease>", _mark_touched, add="+")
+        win.bind("<<ComboboxSelected>>", _mark_touched, add="+")
+
+        def _has_unsaved_changes():
+            for path in _touched:
+                try:
+                    if _value_of(win.nametowidget(path)) != _baseline[path]:
+                        return True
+                except Exception:
+                    continue
+            return False
+
+        def close_settings():
+            if _has_unsaved_changes() and messagebox.askyesno(
+                    "未保存的修改", "设置已修改但尚未保存。\n现在保存吗？（选择「否」将丢弃这些修改）", parent=win):
+                save()
+                return
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
+        bottom_action_row = ttkb.Frame(body)
+        bottom_action_row.pack(fill=X, pady=(0, 8))
+        ttkb.Button(bottom_action_row, text="💾 保存设置", bootstyle="success", width=18, padding=(8, 4),
+                    command=save).pack(side=LEFT)
+        ttkb.Button(bottom_action_row, text="关闭", bootstyle="secondary-outline", width=10, padding=(8, 4),
+                    command=close_settings).pack(side=LEFT, padx=(12, 0))
+        win.protocol("WM_DELETE_WINDOW", close_settings)
         win.after(50, lambda: self._center_toplevel_on_parent(win))
 
     def refresh_devices(self):
