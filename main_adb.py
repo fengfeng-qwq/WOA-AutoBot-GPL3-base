@@ -38,6 +38,16 @@ class WoaBot:
             # 「离开游戏自动暂停」触发时，在等待循环里继续探测前台，回到游戏自动恢复
             if self._leave_pause_active and self.enable_leave_auto_pause:
                 self._check_game_foreground()
+            # 「航线管理界面自动暂停」：等待玩家回到主界面后恢复。
+            # 开启前台检测时先确认仍在游戏内，防止切出游戏后因残帧误恢复
+            if self._route_pause_active and self.enable_route_pause:
+                if self.enable_leave_auto_pause:
+                    self._check_game_foreground()
+                if self._route_pause_active and not self._leave_pause_active:
+                    self._check_route_resume()
+                    # 恢复成功则不再考虑自动返回
+                    if self._route_pause_active:
+                        self._check_route_auto_back()
             time.sleep(0.15)
         if not self.running:
             raise StopSignal()
@@ -120,6 +130,144 @@ class WoaBot:
                 if self.config_callback:
                     self.config_callback("paused", False)
 
+    def set_route_pause(self, enabled):
+        enabled = bool(enabled)
+        if self.enable_route_pause == enabled:
+            return
+        self.enable_route_pause = enabled
+        self.log(f">>> [配置] 航线管理界面自动暂停: {'已开启' if enabled else '已关闭'}")
+        if not enabled and self._route_pause_active:
+            self._route_pause_active = False
+            self._route_back_clicks = 0
+            # 若离开游戏暂停仍在接管，恢复权归它，避免脱离游戏后盲目点击
+            if self.paused and not self._leave_pause_active:
+                self.resume()
+
+    def set_route_back_minutes(self, minutes):
+        try:
+            minutes = int(minutes)
+        except (TypeError, ValueError):
+            minutes = 5
+        self.route_back_minutes = max(0, min(120, minutes))
+
+    def _check_route_interface(self):
+        """主循环内每 1.5s 检测一次：玩家打开航线管理界面则暂停自动化。
+
+        连续 2 次命中才触发（防过渡动画误判）；返回 True 表示本次已触发暂停，
+        主循环应立即 continue 结束当次迭代，避免在航线页上再多执行一次操作。
+        仅置位 paused，不调用 pause()/config_callback，GUI 暂停按钮保持不变。"""
+        if not self.adb or self.paused:
+            return False
+        now = time.time()
+        if now < self._route_check_next_time:
+            return False
+        self._route_check_next_time = now + 1.5
+        screen = self.adb.get_screenshot_cached(max_age_ms=100)
+        if screen is None:
+            return False
+        if self._route_tabs_matched(screen):
+            self._route_enter_hits += 1
+        else:
+            self._route_enter_hits = 0
+            return False
+        if self._route_enter_hits < 2:
+            return False
+        self._route_enter_hits = 0
+        self._route_pause_active = True
+        self._route_last_input_time = time.time()
+        self._route_back_clicks = 0
+        self.paused = True
+        self.log("🤚 [航线检测] 检测到航线管理界面，已暂停自动化，等待玩家操作（回到主界面自动恢复）")
+        return True
+
+    def _route_tabs_matched(self, screen):
+        """底栏「航线市场/运营中」整条模板任一状态命中即视为航线管理页。"""
+        for tpl_name in ("route_tabs_market_active.png", "route_tabs_ops_active.png"):
+            s = self._match_template_score(screen, tpl_name, self.ROUTE_TABS_ROI)
+            if s is not None and s >= self.ROUTE_TABS_THRESHOLD:
+                return True
+        return False
+
+    def _check_route_resume(self):
+        """暂停等待循环内每 2s 检测一次：玩家回到主界面（底部按钮栏连续 2 次命中）则恢复运行。
+
+        仅清除自身触发的暂停；手动暂停与离开游戏暂停不受本方法影响。"""
+        if not self.adb:
+            return
+        now = time.time()
+        if now < self._route_resume_next_time:
+            return
+        self._route_resume_next_time = now + 2.0
+        screen = self.adb.get_screenshot_cached(max_age_ms=100)
+        if screen is None:
+            return
+        for tpl_name in ("main_dock_tower.png", "main_dock_crane.png"):
+            s = self._match_template_score(screen, tpl_name, self.ROUTE_DOCK_ROI)
+            if s is not None and s >= self.ROUTE_DOCK_THRESHOLD:
+                self._route_resume_hits += 1
+                break
+        else:
+            self._route_resume_hits = 0
+            return
+        if self._route_resume_hits < 2:
+            return
+        self._route_resume_hits = 0
+        self._route_pause_active = False
+        self._route_back_clicks = 0
+        self.paused = False
+        # 与 resume() 相同的计时复位，防止恢复后立即触发防卡死
+        self.last_seen_main_interface_time = time.time()
+        self.last_periodic_check_time = 0.0
+        self.last_window_close_time = time.time()
+        self.log("▶️ [航线检测] 已回到主界面，自动恢复运行")
+
+    def _probe_touch_activity(self):
+        """采样 3 秒设备输入事件，判断玩家是否正在触摸屏幕。
+
+        返回 True=有触摸, False=无触摸, None=探测失败（不参与空闲判定）。
+        returncode 124 为设备端 timeout 正常截断。"""
+        if not self.adb:
+            return None
+        try:
+            r = self.adb.run_cmd(["shell", "timeout", "3", "getevent", "-ql"], timeout=8)
+        except Exception:
+            return None
+        if r is None:
+            return None
+        if getattr(r, "returncode", 1) not in (0, 124):
+            return None
+        out = r.stdout.decode("utf-8", "ignore") if getattr(r, "stdout", None) else ""
+        return any(line.strip() for line in out.splitlines())
+
+    def _check_route_auto_back(self):
+        """暂停等待循环内：航线页无操作超时则点左上角返回键送玩家回主界面。
+
+        空闲判定基于 getevent 触摸采样（任何触摸都会刷新空闲计时），
+        最多点 3 次返回键；期间主界面锚点命中则由 _check_route_resume 正常恢复。"""
+        if not self.adb or self.route_back_minutes <= 0:
+            return
+        now = time.time()
+        if now >= self._route_next_input_probe:
+            self._route_next_input_probe = now + 5.0
+            activity = self._probe_touch_activity()
+            if activity:
+                self._route_last_input_time = now
+            elif activity is None:
+                return
+        if now - self._route_last_input_time < self.route_back_minutes * 60:
+            return
+        if now - self._route_own_click_time < 6.0:
+            return  # 刚点过返回键，这段窗口内采样到的输入可能是自己的
+        if self._route_back_clicks >= 3:
+            return  # 已放弃：保持暂停，等玩家自行回到主界面
+        self._route_back_clicks += 1
+        self._route_own_click_time = time.time()
+        self.log(f"🛫 [航线检测] 航线管理界面无操作超过 {self.route_back_minutes} 分钟，自动返回主界面（第 {self._route_back_clicks}/3 次）")
+        try:
+            self.adb.click(self.ROUTE_BACK_X, self.ROUTE_BACK_Y, random_offset=3)
+        except Exception as e:
+            self.log(f"🛫 [航线检测] 返回键点击失败: {e}")
+
     def __init__(self, log_callback=None, config_callback=None, instance_id=1):
         self.instance_id = instance_id
         self.last_staff_log_time = 0
@@ -159,6 +307,26 @@ class WoaBot:
         self._leave_pause_active = False
         self._fg_check_next_time = 0.0
         self._fg_miss_count = 0
+        # 航线管理界面自动暂停：识别玩家打开的航线管理页，暂停等待接手（仅日志，不改 GUI 按钮状态）
+        self.enable_route_pause = False
+        self._route_pause_active = False
+        self._route_check_next_time = 0.0
+        self._route_enter_hits = 0
+        self._route_resume_next_time = 0.0
+        self._route_resume_hits = 0
+        # 航线页无操作自动返回：getevent 触摸采样判定空闲，超时点返回键送回主界面
+        self.route_back_minutes = 5
+        self._route_last_input_time = 0.0
+        self._route_next_input_probe = 0.0
+        self._route_back_clicks = 0
+        self._route_own_click_time = 0.0
+        # 坐标基于逻辑分辨率 1600x900（引擎会对任意截图归一化后再匹配）
+        self.ROUTE_TABS_ROI = (612, 794, 350, 94)
+        self.ROUTE_TABS_THRESHOLD = 0.85
+        self.ROUTE_DOCK_ROI = (525, 769, 525, 112)
+        self.ROUTE_DOCK_THRESHOLD = 0.85
+        self.ROUTE_BACK_X = 59
+        self.ROUTE_BACK_Y = 55
         self.control_method = "adb"
         self.screenshot_method = "nemu_ipc"
         self.mumu_path = ""
@@ -1778,6 +1946,9 @@ class WoaBot:
     def stop(self):
         self.running = False
         self.paused = False  # 停止时清除暂停状态
+        self._leave_pause_active = False
+        self._route_pause_active = False
+        self._route_back_clicks = 0
         self.log(">>> 正在停止脚本...")
         self._print_session_stats()
         self._save_stats_to_csv()
@@ -1830,6 +2001,8 @@ class WoaBot:
             return
         self.paused = False
         self._leave_pause_active = False
+        self._route_pause_active = False
+        self._route_back_clicks = 0
         # 重置界面检测计时，防止暂停期间累计的"未检测到主界面"触发防卡死
         self.last_seen_main_interface_time = time.time()
         self.last_periodic_check_time = 0.0
@@ -1984,6 +2157,10 @@ class WoaBot:
                 # ── 离开游戏自动暂停：前台包名检测（内部 2s 节流）──
                 if self.enable_leave_auto_pause:
                     self._check_game_foreground()
+
+                # ── 航线管理界面自动暂停：玩家接手保护（内部 1.5s 节流，连续 2 次确认）──
+                if self.enable_route_pause and self._check_route_interface():
+                    continue
                 
                 if self._handle_server_error_popup():
                     idle_count = 0

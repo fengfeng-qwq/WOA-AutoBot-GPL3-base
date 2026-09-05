@@ -758,6 +758,8 @@ class Application(ttkb.Window):
         self.var_anti_stuck_enabled = tk.BooleanVar(value=self.config.get("anti_stuck_enabled", True))
         self.var_anti_stuck_threshold = tk.StringVar(value=str(self.config.get("anti_stuck_threshold", 6)))
         self.var_leave_auto_pause = tk.BooleanVar(value=bool(self.config.get("leave_auto_pause", False)))
+        self.var_route_pause = tk.BooleanVar(value=bool(self.config.get("route_auto_pause", False)))
+        self.var_route_back_minutes = tk.StringVar(value=str(self.config.get("route_back_minutes", 5)))
         self.var_notify_enabled = tk.BooleanVar(value=bool(self.config.get("mobile_notify_enabled", False)))
         self.var_notify_provider = tk.StringVar(value=str(self.config.get("mobile_notify_provider", "wecom")))
         self.var_notify_webhook = tk.StringVar(value=str(self.config.get("mobile_notify_webhook", "")))
@@ -3773,6 +3775,23 @@ class Application(ttkb.Window):
             "ADB检测包名为com.haugland.woa是否在前台运行，否则暂停，支持自动恢复",
         ).pack(side=LEFT, padx=5)
 
+        f_route_pause = ttkb.Frame(tab_device_right)
+        f_route_pause.pack(fill=X, pady=5)
+        ttkb.Checkbutton(f_route_pause, text="航线管理界面自动暂停", variable=self.var_route_pause,
+                         command=lambda: self._toggle_functional_switch("航线管理界面自动暂停", self.var_route_pause),
+                         bootstyle="success-round-toggle").pack(side=LEFT)
+        self.create_info_icon(
+            f_route_pause,
+            "识别到玩家打开航线管理界面时暂停自动化（仅日志提示，不改变暂停按钮），回到主界面后自动恢复",
+        ).pack(side=LEFT, padx=5)
+
+        f_route_back = ttkb.Frame(tab_device_right)
+        f_route_back.pack(fill=X, pady=(0, 5), padx=(24, 0))
+        ttkb.Label(f_route_back, text="无操作自动返回:").pack(side=LEFT)
+        e_route_back = ttkb.Entry(f_route_back, textvariable=self.var_route_back_minutes, width=5)
+        e_route_back.pack(side=LEFT, padx=5)
+        ttkb.Label(f_route_back, text="分钟，0=不启用（范围 0-120）", bootstyle="secondary").pack(side=LEFT)
+
         ttkb.Separator(tab_runtime_left).pack(fill=X, pady=2)
         ttkb.Label(tab_runtime_left, text="速度优化（风险选项）", font=("bold")).pack(anchor="w")
         f_speed_row = ttkb.Frame(tab_runtime_left)
@@ -4029,6 +4048,12 @@ class Application(ttkb.Window):
             self.config["random_task_order"] = self.var_random_task.get()
             self.config["anti_stuck_enabled"] = self.var_anti_stuck_enabled.get()
             self.config["leave_auto_pause"] = bool(self.var_leave_auto_pause.get())
+            self.config["route_auto_pause"] = bool(self.var_route_pause.get())
+            try:
+                route_back_minutes = int(self.var_route_back_minutes.get())
+            except (TypeError, ValueError):
+                route_back_minutes = 5
+            self.config["route_back_minutes"] = max(0, min(120, route_back_minutes))
             notify_provider = "dingtalk" if provider_combo.current() == 1 else "wecom"
             notify_webhook = e_notify_webhook.get().strip()
             notify_keyword = e_notify_keyword.get().strip()
@@ -4102,6 +4127,10 @@ class Application(ttkb.Window):
                 changed.append(("防卡死", "开" if self.config.get("anti_stuck_enabled") else "关"))
             if old_cfg.get("leave_auto_pause") != self.config.get("leave_auto_pause"):
                 changed.append(("离开游戏自动暂停", "开" if self.config.get("leave_auto_pause") else "关"))
+            if old_cfg.get("route_auto_pause") != self.config.get("route_auto_pause"):
+                changed.append(("航线管理界面自动暂停", "开" if self.config.get("route_auto_pause") else "关"))
+            if old_cfg.get("route_back_minutes") != self.config.get("route_back_minutes"):
+                changed.append(("航线页无操作自动返回", f"{self.config.get('route_back_minutes', 5)} 分钟"))
             if old_cfg.get("anti_stuck_threshold") != self.config.get("anti_stuck_threshold"):
                 changed.append(("防卡死触发阈值", str(self.config.get("anti_stuck_threshold", 6))))
             if old_cfg.get("mobile_notify_enabled") != self.config.get("mobile_notify_enabled"):
@@ -4452,6 +4481,14 @@ class Application(ttkb.Window):
         self.config["anti_stuck_enabled"] = self.var_anti_stuck_enabled.get()
         self.config["anti_stuck_threshold"] = anti_stuck_threshold
         self.config["leave_auto_pause"] = bool(self.var_leave_auto_pause.get())
+        self.config["route_auto_pause"] = bool(self.var_route_pause.get())
+        try:
+            route_back_minutes = int(self.var_route_back_minutes.get())
+        except (TypeError, ValueError):
+            route_back_minutes = 5
+        route_back_minutes = max(0, min(120, route_back_minutes))
+        self.config["route_back_minutes"] = route_back_minutes
+        self.var_route_back_minutes.set(str(route_back_minutes))
         self.save_config()
         if self.bot:
             self.bot.set_bonus_staff_feature(self.var_bonus_staff.get())
@@ -4477,6 +4514,8 @@ class Application(ttkb.Window):
                 selection={c["key"]: self.var_category_selection[c["key"]].get() for c in SIDEBAR_CATEGORIES})
             self.bot.set_anti_stuck_config(self.var_anti_stuck_enabled.get(), anti_stuck_threshold, log_change=not no_log)
             self.bot.set_leave_auto_pause(self.var_leave_auto_pause.get())
+            self.bot.set_route_pause(self.var_route_pause.get())
+            self.bot.set_route_back_minutes(route_back_minutes)
             self.bot.set_control_method(self.config.get("control_method", "adb"))
             self.bot.set_screenshot_method(self.config.get("screenshot_method", "nemu_ipc"))
             self.bot.set_mumu_path(self.config.get("mumu_path", ""))
