@@ -2707,7 +2707,7 @@ class WoaBot:
         return True
 
     def _open_tower_menu(self, fast=False, budget_start=None, budget_sec=None):
-        """点击(646,822)打开塔台菜单，并通过 ROI 内检测 tower_1.png 校验是否成功。
+        """点击(577,822)打开塔台菜单，并通过 ROI 内检测 tower_1.png 校验是否成功。
         最多重试2次（间隔2s），返回 True/False。"""
         import cv2
         def _budget_exhausted(guard=0.0):
@@ -2721,7 +2721,7 @@ class WoaBot:
         for attempt in range(max_attempts):
             if _budget_exhausted(guard=0.2):
                 break
-            self.adb.click(646, 822)
+            self.adb.click(577, 822)
             self.sleep(click_wait)
             screen = self.adb.get_screenshot()
             if screen is not None:
