@@ -3005,83 +3005,95 @@ class WoaBot:
                      else f"   🗼 ⚠️ 滑条未能定位到 {minutes}m，按游戏记忆档延长")
         return False
 
+    def _reliable_click(self, x, y):
+        """run_cmd 直连点击（逻辑坐标），绕开可能静默失效的长连接通道。"""
+        dx, dy = self.adb._logical_to_device_point(int(x), int(y))
+        self.adb.run_cmd(["shell", "input", "tap", str(dx), str(dy)], timeout=10)
+
     def _do_delay_all(self, target_minutes=None):
-        """点击「全部激活」按钮并确认延时弹窗（含二次确认）。返回 True/False。
-        流程：全部激活 → 一次确认(delay/delay_1) → 二次确认(yes.png@715,546)
-        target_minutes：延时档位目标（分钟），>0 时点「延长」前先把持续时间滑条拖到该档位。"""
+        """点击「全部激活」按钮并确认延时弹窗。返回 True/False。
+        流程：全部激活 → 一次确认(delay/delay_1「延长」) → 二次确认(yes.png「是」)。
+        target_minutes：延时档位目标（分钟），>0 时点「延长」前先把持续时间滑条拖到该档位。
+        所有关键点击走 run_cmd 直连（长连接通道会静默吞点击），且「延长」点击带
+        「校验是弹窗出现、未出现则重点」循环；二次确认必须看到过「是」并确认其消失
+        才算成功，杜绝弹窗从未出现也误判成功的假阳性。"""
         self.log("   🗼 点击「全部激活」按钮")
-        self.adb.click(*self.TOWER_DELAY_ALL_BTN)
+        bx, by = self.TOWER_DELAY_ALL_BTN
+        self._reliable_click(bx, by)
         self.sleep(0.5)
 
-        # ── 第一阶段：等待一次确认弹窗（delay.png / delay_1.png）──
+        # ── 第一阶段：等「延长」弹窗出现 → 拖滑条 → 点「延长」→ 等「是」弹窗出现 ──
         t0 = time.time()
         first_ok = False
-        while time.time() - t0 < 6.0:
+        extend_clicks = 0
+        while time.time() - t0 < 15.0 and extend_clicks < 3:
             self._check_running()
             screen = self.adb.get_screenshot()
-            if screen is not None:
-                for btn in ('delay.png', 'delay_1.png'):
-                    pos = self._locate_on_screen(btn, screen, confidence=0.75)
-                    if pos:
-                        # 弹窗已出现：先按延时档位拖持续时间滑条，再点「延长」
-                        if target_minutes:
-                            self._set_delay_slider(target_minutes)
-                        self.adb.click(pos[0], pos[1], random_offset=2)
+            if screen is None:
+                self.sleep(0.2)
+                continue
+            if self._locate_on_screen('yes.png', screen, confidence=0.75):
+                first_ok = True  # 「是」弹窗已出现，直接进第二阶段
+                break
+            pos = None
+            for btn in ('delay.png', 'delay_1.png'):
+                pos = self._locate_on_screen(btn, screen, confidence=0.75)
+                if pos:
+                    break
+            if pos:
+                if target_minutes:
+                    self._set_delay_slider(target_minutes)
+                extend_clicks += 1
+                self.log(f"   🗼 点击「延长」（第 {extend_clicks}/3 次）")
+                self._reliable_click(pos[0], pos[1])
+                wt = time.time()
+                while time.time() - wt < 2.5:
+                    self._check_running()
+                    screen = self.adb.get_screenshot()
+                    if screen is not None and self._locate_on_screen('yes.png', screen, confidence=0.75):
                         first_ok = True
                         break
-            if first_ok:
-                break
-            self.sleep(0.15)
+                    self.sleep(0.2)
+                if first_ok:
+                    break
+            self.sleep(0.2)
         if not first_ok:
-            self.log("   🗼 ⚠️ 一次确认弹窗未出现")
+            self.log("   🗼 ⚠️ 一次确认弹窗未出现/延长未生效")
             return False
 
-        # ── 第二阶段：等待二次确认弹窗（yes.png @ 715,546）──
+        # ── 第二阶段：二次确认（yes.png「是」）——看到过并确认消失才算成功 ──
         self.sleep(0.4)
         t1 = time.time()
         second_ok = False
-        while time.time() - t1 < 5.0:
+        yes_seen = False
+        while time.time() - t1 < 6.0:
             self._check_running()
             screen = self.adb.get_screenshot()
-            if screen is not None:
-                yes_pos = self._locate_on_screen('yes.png', screen, confidence=0.75)
-                if yes_pos:
-                    # 点击二次确认按钮（优先使用模板匹配位置，回退到固定坐标）
-                    self.log("   🗼 点击二次确认 (yes.png)")
-                    self.adb.click(yes_pos[0], yes_pos[1], random_offset=8)
-                    self.sleep(0.4)
-                    # 验证弹窗消失
-                    verify = self.adb.get_screenshot()
-                    if verify is not None and not self._locate_on_screen('yes.png', verify, confidence=0.75):
-                        second_ok = True
-                        break
-                    # 仍在，用固定坐标点击重试
-                    self.adb.click(715, 546, random_offset=8)
-                    self.sleep(0.4)
-                    verify2 = self.adb.get_screenshot()
-                    if verify2 is not None and not self._locate_on_screen('yes.png', verify2, confidence=0.75):
-                        second_ok = True
-                        break
-                else:
-                    # 模板匹配未找到，尝试固定坐标盲点
-                    self.adb.click(715, 546, random_offset=8)
-                    self.sleep(0.4)
-                    verify3 = self.adb.get_screenshot()
-                    if verify3 is not None and not self._locate_on_screen('yes.png', verify3, confidence=0.75):
-                        second_ok = True
-                        break
-            self.sleep(0.3)
+            if screen is None:
+                self.sleep(0.2)
+                continue
+            yes_pos = self._locate_on_screen('yes.png', screen, confidence=0.75)
+            if yes_pos:
+                yes_seen = True
+                self.log("   🗼 点击二次确认 (yes.png)")
+                self._reliable_click(yes_pos[0], yes_pos[1])
+                self.sleep(0.5)
+                verify = self.adb.get_screenshot()
+                if verify is not None and not self._locate_on_screen('yes.png', verify, confidence=0.75):
+                    second_ok = True
+                    break
+            self.sleep(0.25)
 
         if second_ok:
             self.log("   🗼 ✅ 二次确认完成")
             return True
 
-        # ── 兜底：检查是否弹窗已自行消失 ──
+        # ── 兜底：确实看到过「是」且所有弹窗已自行消失，才视为成功 ──
         screen = self.adb.get_screenshot()
-        if screen is not None:
-            has_delay = any(self._locate_on_screen(b, screen, confidence=0.75)
-                           for b in ('delay.png', 'delay_1.png', 'yes.png'))
-            if not has_delay:
+        if yes_seen and screen is not None:
+            has_popup = any(self._locate_on_screen(btn, screen, confidence=0.75)
+                            for btn in ('delay.png', 'delay_1.png', 'yes.png'))
+            if not has_popup:
                 self.log("   🗼 ℹ️ 确认弹窗已自行消失，视为成功")
                 return True
 
