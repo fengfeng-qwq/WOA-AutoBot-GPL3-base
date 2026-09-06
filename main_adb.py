@@ -4247,6 +4247,8 @@ class WoaBot:
         # Doing 任务优先秒处理
         if not self.enable_no_takeoff_mode:
             for dt in doing_tasks:
+                if self.paused:  # 架次边界响应暂停（暂停检查只在主循环顶部，批处理循环内须自查）
+                    return False
                 if time.time() <= self.doing_task_forbidden_until:
                     continue
                 if self._is_task_on_cooldown(dt):
