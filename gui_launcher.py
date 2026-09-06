@@ -2458,7 +2458,7 @@ class Application(ttkb.Window):
         right_col.grid(row=0, column=2, sticky="nsew")
         self._build_right_tabs(right_col)
 
-        self.after(100, self._do_initial_scan)
+        self.after(300, self._do_initial_scan)
 
     # ─── 子组件构建方法 ───────────────────────────────
 
@@ -2746,12 +2746,47 @@ class Application(ttkb.Window):
         for btn in [self.btn_main_start, self.btn_mini_start]:
             btn.configure(state="disabled")
         self.update_idletasks()
+        overlay = self._show_scan_overlay()
         try:
-            devs = self._scan_devices_with_public_targets(debug=False)
-        except Exception as e:
-            print(f">>> [扫描异常] {e}")
-            devs = []
+            try:
+                devs = self._scan_devices_with_public_targets(debug=False)
+            except Exception as e:
+                print(f">>> [扫描异常] {e}")
+                devs = []
+        finally:
+            if overlay is not None:
+                overlay.destroy()
+            self.update_idletasks()
         self._apply_scan_result(devs)
+
+    def _show_scan_overlay(self):
+        """扫描期间在主窗口居中显示「正在扫描设备」提示条。
+
+        扫描在主线程同步执行（数秒，期间事件循环停摆），先把提示条
+        完整绘制再进入扫描，避免用户面对未画完的窗口。创建失败不影响扫描。"""
+        try:
+            ov = ttkb.Toplevel(self)
+            ov.overrideredirect(True)
+            ov.transient(self)
+            c = self._clr
+            ov.configure(bg=c["surface"])
+            ttkb.Label(ov, text="正在扫描设备，请稍候…",
+                       font=(DEFAULT_FONT, 11, "bold"),
+                       bootstyle="primary", background=c["surface"]).pack(padx=30, pady=16)
+            self.update_idletasks()
+            w, h = 250, 58
+            ov.attributes("-topmost", True)  # 必须在 geometry 之前：之后设置会把位置重置为 (0,0)
+            if self.winfo_width() > 1:  # 主窗口已映射：居中于主窗口
+                x = self.winfo_rootx() + (self.winfo_width() - w) // 2
+                y = self.winfo_rooty() + (self.winfo_height() - h) // 2
+            else:  # 尚未映射：居中于屏幕
+                x = (self.winfo_screenwidth() - w) // 2
+                y = (self.winfo_screenheight() - h) // 2
+            ov.geometry(f"{w}x{h}+{max(0, x)}+{max(0, y)}")
+            ov.update()  # 强制上屏后再进入阻塞扫描
+            return ov
+        except Exception:
+            return None
 
     def _apply_scan_result(self, devs):
         """在主线程更新扫描结果"""
