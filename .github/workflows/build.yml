@@ -1,6 +1,16 @@
 # WOA AutoBot — GitHub Actions CI/CD
 # ============================================================
-# 自动编译 Windows .exe 和 macOS .app，Tag 推送时自动发布 Release
+# 自动编译 Windows .exe 和 macOS .app
+# 手动触发时可填写版本号、选择正式版 / Pre-release（测试版）
+#
+# 手动发布用法（Actions → Build & Release → Run workflow）：
+#   1. 「Use workflow from」选择分支或 tag（如 dev）
+#   2. 勾选「创建 GitHub Release」
+#   3. 填「版本号」（如 1.5.3-beta）——从分支触发时必填；
+#      发布时自动加 v 前缀创建 tag（如 v1.5.3-beta），指向所选分支当时的 HEAD
+#   4. beta/测试版勾选「标记为 Pre-release」：不占用 Latest 徽标，
+#      Latest 仍停留在上一个正式版；不勾则本次发布成为 Latest
+#   注意：代码内 LOCAL_VERSION 需与填写的版本号一致（窗口标题显示的是代码内版本）
 #
 # 安全说明：
 #   - GITHUB_TOKEN 由 GitHub 自动提供，无需手动配置
@@ -22,6 +32,15 @@ on:
         description: '创建 GitHub Release'
         type: boolean
         default: false
+      version:
+        description: '版本号（如 1.5.3-beta；留空则用 tag 名，从分支触发时必填）'
+        type: string
+        required: false
+        default: ''
+      prerelease:
+        description: '标记为 Pre-release（beta/测试版，不占用 Latest 徽标）'
+        type: boolean
+        default: false
 
 env:
   PYTHON_VERSION: '3.11'
@@ -32,9 +51,41 @@ env:
 # ============================================================
 jobs:
 
+  # ── 前置校验：开跑编译前先检查版本号，避免白跑十几分钟才发布失败 ──
+  pre-check:
+    name: 发布参数校验
+    runs-on: ubuntu-latest
+    steps:
+      - name: 校验版本号输入
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          IN_CREATE_RELEASE: ${{ github.event.inputs.create_release }}
+          IN_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if [ "$EVENT_NAME" != "workflow_dispatch" ]; then
+            echo "tag 推送触发，跳过输入校验"
+            exit 0
+          fi
+          if [ "$IN_CREATE_RELEASE" != "true" ]; then
+            echo "未勾选创建 Release，仅编译，跳过校验"
+            exit 0
+          fi
+          if [ -n "$IN_VERSION" ]; then
+            echo "使用手填版本号: $IN_VERSION"
+            exit 0
+          fi
+          case "$GITHUB_REF_NAME" in
+            v*) echo "未填版本号，使用 tag 名: $GITHUB_REF_NAME" ;;
+            *)
+              echo "::error::勾选了「创建 Release」但版本号为空：当前从分支「$GITHUB_REF_NAME」触发，分支名不能用作版本号，请填写 version 输入（如 1.5.3-beta）"
+              exit 1
+              ;;
+          esac
+
   # ── Windows .exe 编译 ─────────────────────────────────────
   build-windows:
     name: Windows — PyInstaller .exe
+    needs: pre-check
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -73,6 +124,7 @@ jobs:
   # ── macOS .app 编译 ───────────────────────────────────────
   build-macos:
     name: macOS — PyInstaller .app
+    needs: pre-check
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -111,7 +163,7 @@ jobs:
           retention-days: 30
 
   # ── GitHub Release 发布 ───────────────────────────────────
-  # 仅在推送 Tag（v*）或手动触发时执行
+  # 仅在推送 Tag（v*）或手动触发且勾选创建 Release 时执行
   release:
     name: 发布 GitHub Release
     needs: [build-windows, build-macos]
@@ -128,20 +180,33 @@ jobs:
 
       - name: 读取版本号
         id: version
+        env:
+          IN_VERSION: ${{ github.event.inputs.version }}
         run: |
-          VER="${{ github.ref_name }}"
+          VER="$IN_VERSION"
+          if [ -z "$VER" ]; then
+            VER="$GITHUB_REF_NAME"
+          fi
           VER="${VER#v}"
-          echo "version=$VER" >> $GITHUB_OUTPUT
+          if [ -z "$VER" ]; then
+            echo "::error::无法确定版本号（version 输入为空且 ref 名无效）"
+            exit 1
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "版本: $VER"
 
       - name: 创建 Release 并上传资产
         uses: softprops/action-gh-release@v2
         with:
           name: "WOA AutoBot v${{ steps.version.outputs.version }}"
-          tag_name: ${{ github.ref_name }}
+          tag_name: v${{ steps.version.outputs.version }}
           draft: false
-          prerelease: false
+          prerelease: ${{ github.event.inputs.prerelease == 'true' }}
           generate_release_notes: true
+          # 如需 Release 正文直接使用仓库里的公告文件：
+          # 在本 step 之前加一步「actions/checkout@v4」，再取消下行注释
+          # （自动生成的更新日志会附加在正文之后）
+          # body_path: ANNOUNCEMENT.md
           files: |
             ${{ env.APP_NAME }}_Windows/${{ env.APP_NAME }}_Windows.zip
             ${{ env.APP_NAME }}_macOS/${{ env.APP_NAME }}_macOS.zip
