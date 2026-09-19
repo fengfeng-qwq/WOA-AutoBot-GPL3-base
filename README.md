@@ -70,6 +70,17 @@ uv run python gui_launcher.py
 python gui_launcher.py
 ```
 
+### 配置与数据位置
+
+打包版的个人数据统一存放在系统标准目录，与程序本体分离，**覆盖升级不会丢设置**：
+
+- Windows：`%APPDATA%\WOA_AutoBot`
+- macOS：`~/Library/Application Support/WOA_AutoBot`
+- Linux：`~/.woa_autobot`
+- 源码运行：项目根目录（与打包版互不影响）
+
+备份或迁移只需拷贝该目录。需要单文件形式时，可在 **高级设置 → 导出配置 / 导入配置** 把全部实例的设置打包成一个 JSON（导出文件含 Webhook 等私密信息，请勿公开分享）。详见 [GUIDE.md](GUIDE.md)。
+
 ## 最近更新
 ### v1.5.10-beta2 (2026-09-19)
 

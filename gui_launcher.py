@@ -1312,7 +1312,81 @@ class Application(ttkb.Window):
                 return {}
         return {}
 
+    def _instance_config_paths(self):
+        """返回 [(实例号, 配置文件路径)]，覆盖全部实例（含尚未落盘的）。"""
+        return [(i, os.path.join(_DATA_BASE, "config.json" if i == 1 else f"config_{i}.json"))
+                for i in range(1, MAX_INSTANCES + 1)]
+
+    def _export_config_bundle(self, path):
+        """把全部实例配置打包成单个 JSON。当前实例取内存值（最新），其余读磁盘。"""
+        instances = {}
+        for idx, p in self._instance_config_paths():
+            data = None
+            if idx == INSTANCE_ID:
+                data = dict(self.config)
+            elif os.path.exists(p):
+                try:
+                    with open(p, "rb" if orjson else "r", encoding=None if orjson else "utf-8") as f:
+                        raw = f.read()
+                    data = orjson.loads(raw) if orjson else json.loads(raw)
+                except Exception:
+                    data = None
+            if isinstance(data, dict) and data:
+                instances[str(idx)] = data
+        if not instances:
+            raise ValueError("没有可导出的配置")
+        bundle = {
+            "_kind": "woa_autobot_config",
+            "_format": 1,
+            "_app_version": LOCAL_VERSION,
+            "_exported_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "_notice": "包含 Webhook 等私密信息，请勿公开分享",
+            "instances": instances,
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(bundle, f, ensure_ascii=False, indent=2)
+        return len(instances)
+
+    def _import_config_bundle(self, path):
+        """导入导出生成的 JSON；覆盖前逐个备份。返回被写入的实例号列表。"""
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("文件格式不正确：根节点不是对象")
+        if data.get("_kind") == "woa_autobot_config" and isinstance(data.get("instances"), dict):
+            incoming = data["instances"]
+        elif all(isinstance(v, dict) for v in data.values()) and data:
+            incoming = data          # 兼容手工整理的 {实例号: 配置} 形式
+        else:
+            incoming = {str(INSTANCE_ID): data}   # 兼容单份 config.json 直接导入
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        written = []
+        for key, cfg in incoming.items():
+            try:
+                idx = int(key)
+            except (TypeError, ValueError):
+                continue
+            if not (1 <= idx <= MAX_INSTANCES) or not isinstance(cfg, dict) or not cfg:
+                continue
+            target = os.path.join(_DATA_BASE, "config.json" if idx == 1 else f"config_{idx}.json")
+            if os.path.exists(target):
+                try:
+                    with open(target, "rb") as src, open(f"{target}.bak-{stamp}", "wb") as dst:
+                        dst.write(src.read())
+                except OSError:
+                    pass
+            with open(target, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+            written.append(idx)
+        if not written:
+            raise ValueError("文件中没有找到可导入的实例配置")
+        # 导入的文件已落盘；本次进程若再用内存里的旧值写一次配置就会把它冲掉
+        self._config_imported = True
+        return sorted(written)
+
     def save_config(self):
+        if getattr(self, "_config_imported", False):
+            return
         self.config["bonus_staff"] = self.var_bonus_staff.get()
         self.config["vehicle_buy"] = self.var_vehicle_buy.get()
         self.config["speed_mode"] = self.var_speed_mode.get()
@@ -4293,12 +4367,56 @@ class Application(ttkb.Window):
             except Exception:
                 pass
 
+        def do_export_config():
+            try:
+                default_name = f"woa_autobot_config_{time.strftime('%Y%m%d_%H%M')}.json"
+                path = filedialog.asksaveasfilename(
+                    title="导出配置", defaultextension=".json", initialfile=default_name,
+                    filetypes=[("JSON 文件", "*.json")])
+                if not path:
+                    return
+                count = self._export_config_bundle(path)
+                messagebox.showinfo(
+                    "导出完成",
+                    f"已导出 {count} 个实例的配置：\n{path}\n\n"
+                    "⚠️ 该文件包含 Webhook 地址等私密信息，请勿公开分享。",
+                    parent=win)
+                print(f">>> [配置] 已导出 {count} 个实例 → {path}")
+            except Exception as e:
+                messagebox.showerror("导出失败", str(e), parent=win)
+
+        def do_import_config():
+            path = filedialog.askopenfilename(title="导入配置", filetypes=[("JSON 文件", "*.json")])
+            if not path:
+                return
+            if not messagebox.askyesno(
+                    "确认导入",
+                    "导入会覆盖对应的配置文件（覆盖前自动备份为 .bak-时间戳），\n"
+                    "并且需要重启程序后生效。\n\n继续导入吗？",
+                    parent=win):
+                return
+            try:
+                ids = self._import_config_bundle(path)
+            except Exception as e:
+                messagebox.showerror("导入失败", str(e), parent=win)
+                return
+            messagebox.showinfo(
+                "导入完成",
+                f"已写入实例 {', '.join(str(i) for i in ids)} 的配置，原文件已备份。\n\n"
+                "请重启 WOA AutoBot 使新配置生效。",
+                parent=win)
+            print(f">>> [配置] 已导入实例 {ids} ← {path}（请重启生效）")
+
         bottom_action_row = ttkb.Frame(body)
         bottom_action_row.pack(fill=X, pady=(0, 8))
         ttkb.Button(bottom_action_row, text="💾 保存设置", bootstyle="success", width=18, padding=(8, 4),
                     command=save).pack(side=LEFT)
         ttkb.Button(bottom_action_row, text="关闭", bootstyle="secondary-outline", width=10, padding=(8, 4),
                     command=close_settings).pack(side=LEFT, padx=(12, 0))
+        ttkb.Button(bottom_action_row, text="📤 导出配置", bootstyle="info-outline", width=14, padding=(8, 4),
+                    command=do_export_config).pack(side=RIGHT)
+        ttkb.Button(bottom_action_row, text="📥 导入配置", bootstyle="warning-outline", width=14, padding=(8, 4),
+                    command=do_import_config).pack(side=RIGHT, padx=(0, 12))
         win.protocol("WM_DELETE_WINDOW", close_settings)
         win.after(50, lambda: self._center_toplevel_on_parent(win))
 
