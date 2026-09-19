@@ -200,6 +200,9 @@ jobs:
         with:
           name: "WOA AutoBot v${{ steps.version.outputs.version }}"
           tag_name: v${{ steps.version.outputs.version }}
+          # 必须显式指定：action 不给默认值时 GitHub 会按「仓库默认分支」建 tag，
+          # 从 dev 触发时 tag 就会落到 main 的 commit 上（v1.5.10-beta 即因此指错）。
+          target_commitish: ${{ github.sha }}
           draft: false
           prerelease: ${{ github.event.inputs.prerelease == 'true' }}
           generate_release_notes: true

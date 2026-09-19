@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 PYINST=.venv-1/bin/pyinstaller
 PY=.venv-1/bin/python
 APP_NAME="WOA_AutoBot"
-DMG_VOL="WOA AutoBot v1.5.10-beta"
+DMG_VOL="WOA AutoBot v1.5.10-beta2"
 
 echo ">>> [1/6] PyInstaller 打包..."
 rm -rf build dist
@@ -105,8 +105,8 @@ cat > "$APP/Contents/Info.plist" << PLIST
 <key>CFBundleName</key><string>WOA AutoBot</string>
 <key>CFBundleDisplayName</key><string>WOA AutoBot</string>
 <key>CFBundleIdentifier</key><string>com.woa.autobot</string>
-<key>CFBundleVersion</key><string>1.5.10-beta</string>
-<key>CFBundleShortVersionString</key><string>1.5.10-beta</string>
+<key>CFBundleVersion</key><string>1.5.10-beta2</string>
+<key>CFBundleShortVersionString</key><string>1.5.10-beta2</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleExecutable</key><string>$APP_NAME</string>
 <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>

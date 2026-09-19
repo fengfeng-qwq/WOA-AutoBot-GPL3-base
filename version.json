@@ -1,14 +1,14 @@
 {
-  "version": "1.5.10-beta",
+  "version": "1.5.10-beta2",
   "package_urls": [
     {
       "name": "GitHub Release",
-      "url": "https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.5.10-beta/WOA_AutoBot.zip"
+      "url": "https://github.com/fengfeng-qwq/WOA-AutoBot-GPL3-base/releases/download/1.5.10-beta2/WOA_AutoBot_Windows.zip"
     },
     {
       "name": "ghproxy Release",
-      "url": "https://ghproxy.cn/https://github.com/hjtr7mymht-dot/WOA_AutoBot/releases/download/1.5.10-beta/WOA_AutoBot.zip"
+      "url": "https://ghproxy.cn/https://github.com/fengfeng-qwq/WOA-AutoBot-GPL3-base/releases/download/1.5.10-beta2/WOA_AutoBot_Windows.zip"
     }
   ],
-  "notes": "1.5.10-beta：Beta 测试版本"
+  "notes": "1.5.10-beta2：Beta 测试版本"
 }
