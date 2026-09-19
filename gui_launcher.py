@@ -741,6 +741,7 @@ class Application(ttkb.Window):
         self.var_anti_stuck_threshold = tk.StringVar(value=str(self.config.get("anti_stuck_threshold", 6)))
         self.var_leave_auto_pause = tk.BooleanVar(value=bool(self.config.get("leave_auto_pause", False)))
         self.var_route_pause = tk.BooleanVar(value=bool(self.config.get("route_auto_pause", False)))
+        self.var_skip_unassigned = tk.BooleanVar(value=bool(self.config.get("skip_unassigned", False)))
         self.var_route_back_minutes = tk.StringVar(value=str(self.config.get("route_back_minutes", 5)))
         self.var_error_restart = tk.BooleanVar(value=bool(self.config.get("error_restart_enabled", False)))
         self.var_error_restart_threshold = tk.StringVar(value=str(self.config.get("error_restart_threshold", 10)))
@@ -3987,6 +3988,16 @@ class Application(ttkb.Window):
                               "开启后，脚本将在列表前3个任务中随机选择（80%概率），或从下方任务中随机选择（20%概率），以模拟真实操作。").pack(
             side=LEFT, padx=5)
 
+        f_skip_unassigned = ttkb.Frame(tab_runtime_right)
+        f_skip_unassigned.pack(fill=X, pady=5)
+        ttkb.Checkbutton(f_skip_unassigned, text="跳过未分配航班", variable=self.var_skip_unassigned,
+                         command=lambda: self._toggle_functional_switch("跳过未分配航班", self.var_skip_unassigned),
+                         bootstyle="success-round-toggle").pack(side=LEFT)
+        self.create_info_icon(f_skip_unassigned,
+                              "识别右侧列表中未分配航线的飞机（目的地栏为红色 -- 、国旗位为未分配徽标），\n"
+                              "这类飞机需要你手动指派，脚本不再点击其卡片，避免空跑和误判为卡死。\n"
+                              "默认关闭。若发现该做的任务被跳过，可关闭此项反馈。").pack(side=LEFT, padx=5)
+
         f_s = ttkb.Frame(tab_runtime_right)
         f_s.pack(fill=X, pady=5)
         ttkb.Label(f_s, text="地勤分配—拖动随机耗时(ms):").pack(side=LEFT)
@@ -4086,6 +4097,7 @@ class Application(ttkb.Window):
             self.config["anti_stuck_enabled"] = self.var_anti_stuck_enabled.get()
             self.config["leave_auto_pause"] = bool(self.var_leave_auto_pause.get())
             self.config["route_auto_pause"] = bool(self.var_route_pause.get())
+            self.config["skip_unassigned"] = bool(self.var_skip_unassigned.get())
             try:
                 route_back_minutes = int(self.var_route_back_minutes.get())
             except (TypeError, ValueError):
@@ -4177,6 +4189,8 @@ class Application(ttkb.Window):
                 changed.append(("离开游戏自动暂停", "开" if self.config.get("leave_auto_pause") else "关"))
             if old_cfg.get("route_auto_pause") != self.config.get("route_auto_pause"):
                 changed.append(("航线管理界面自动暂停", "开" if self.config.get("route_auto_pause") else "关"))
+            if old_cfg.get("skip_unassigned") != self.config.get("skip_unassigned"):
+                changed.append(("跳过未分配航班", "开" if self.config.get("skip_unassigned") else "关"))
             if old_cfg.get("route_back_minutes") != self.config.get("route_back_minutes"):
                 changed.append(("航线页无操作自动返回", f"{self.config.get('route_back_minutes', 5)} 分钟"))
             if old_cfg.get("error_restart_enabled") != self.config.get("error_restart_enabled"):
@@ -4556,6 +4570,7 @@ class Application(ttkb.Window):
         self.config["anti_stuck_threshold"] = anti_stuck_threshold
         self.config["leave_auto_pause"] = bool(self.var_leave_auto_pause.get())
         self.config["route_auto_pause"] = bool(self.var_route_pause.get())
+        self.config["skip_unassigned"] = bool(self.var_skip_unassigned.get())
         try:
             route_back_minutes = int(self.var_route_back_minutes.get())
         except (TypeError, ValueError):
@@ -4605,6 +4620,7 @@ class Application(ttkb.Window):
             self.bot.set_anti_stuck_config(self.var_anti_stuck_enabled.get(), anti_stuck_threshold, log_change=not no_log)
             self.bot.set_leave_auto_pause(self.var_leave_auto_pause.get())
             self.bot.set_route_pause(self.var_route_pause.get())
+            self.bot.set_skip_unassigned(self.var_skip_unassigned.get())
             self.bot.set_route_back_minutes(route_back_minutes)
             self.bot.set_error_restart(self.var_error_restart.get(), error_threshold, error_window)
             self.bot.set_control_method(self.config.get("control_method", "adb"))

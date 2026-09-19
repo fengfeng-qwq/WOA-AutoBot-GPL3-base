@@ -130,6 +130,13 @@ class WoaBot:
                 if self.config_callback:
                     self.config_callback("paused", False)
 
+    def set_skip_unassigned(self, enabled):
+        enabled = bool(enabled)
+        if self.enable_skip_unassigned == enabled:
+            return
+        self.enable_skip_unassigned = enabled
+        self.log(f">>> [配置] 跳过未分配航班: {'已开启' if enabled else '已关闭'}")
+
     def set_route_pause(self, enabled):
         enabled = bool(enabled)
         if self.enable_route_pause == enabled:
@@ -338,6 +345,9 @@ class WoaBot:
         self._route_enter_hits = 0
         self._route_resume_next_time = 0.0
         self._route_resume_hits = 0
+        # 跳过未分配航班：右侧列表里未分配航线的飞机需玩家手动处理，识别到就不当作任务点击
+        self.enable_skip_unassigned = False
+        self._unassigned_skip_log_ts = 0.0
         # 航线页无操作自动返回：getevent 触摸采样判定空闲，超时点返回键送回主界面
         self.route_back_minutes = 5
         self._route_last_input_time = 0.0
@@ -498,6 +508,14 @@ class WoaBot:
         self.LIST_ROI_X = 1312
         self.LIST_ROI_W = 60
         self.LIST_ROI_H = 900
+        # 未分配航班负样本槽位（卡片右栏）：实测 20 行样本中，未分配卡命中 ≥0.915、已分配卡 ≤0.615
+        self.UNASSIGNED_SLOT_X = (1440, 1512)
+        self.UNASSIGNED_CARD_TOP_DY = 27   # 任务图标匹配中心 y → 卡片顶部 y
+        self.UNASSIGNED_SLOT_DY = {        # 槽位相对卡片顶部的 y 区间
+            'unassigned_dash.png':  (-2, 30),   # 右上：未分配为红色 "--"，已分配为三字码
+            'unassigned_badge.png': (24, 62),   # 右下：未分配为固定徽标，已分配为各国国旗
+        }
+        self.UNASSIGNED_MATCH_CONF = 0.78
         self.REGION_BOTTOM_ROI = (20, 750, 340, 130)
         self.REGION_VACANT_ROI = (480, 799, 800, 220)  # 以 (489,770) 为中心
 
@@ -568,6 +586,13 @@ class WoaBot:
             p = self.icon_path + tf
             if os.path.exists(p):
                 self.task_templates[tf] = read_image_safe(p)
+
+        # 未分配航班负样本模板（命中即判定该卡片需玩家手动处理，不作为任务点击）
+        self.unassigned_templates = {}
+        for tf in ('unassigned_dash.png', 'unassigned_badge.png'):
+            p = self.icon_path + tf
+            if os.path.exists(p):
+                self.unassigned_templates[tf] = read_image_safe(p)
 
     def set_random_task_mode(self, enabled, log_change=True):
         if self.enable_random_task == enabled:
@@ -4037,6 +4062,41 @@ class WoaBot:
                     return True
         return False
 
+    def _match_unassigned_slot(self, screen, match_center_y):
+        """在卡片右栏匹配未分配负样本，返回 (模板名, 分值)；未命中返回 (None, 0.0)。
+
+        未分配航班的卡片右上是红色 "--"（已分配为三字码）、右下是固定徽标（已分配为各国国旗），
+        两者都不依赖机型/机位字母，因此可作稳定判据。
+        """
+        x0, x1 = self.UNASSIGNED_SLOT_X
+        top = int(match_center_y) - self.UNASSIGNED_CARD_TOP_DY
+        if top < 0 or screen.shape[1] < x1 or not self.unassigned_templates:
+            return None, 0.0
+        best_name, best_score = None, 0.0
+        for name, tmpl in self.unassigned_templates.items():
+            if tmpl is None:
+                continue
+            dy0, dy1 = self.UNASSIGNED_SLOT_DY.get(name, (-2, 62))
+            y0, y1 = top + dy0, top + dy1
+            if y0 < 0 or y1 > screen.shape[0] or y1 - y0 <= tmpl.shape[0]:
+                continue
+            try:
+                roi = cv2.cvtColor(screen[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+                res = cv2.matchTemplate(roi, cv2.cvtColor(tmpl, cv2.COLOR_BGR2GRAY), cv2.TM_CCOEFF_NORMED)
+                score = float(res.max())
+            except Exception:
+                continue
+            if score > best_score:
+                best_name, best_score = name, score
+        return best_name, best_score
+
+    def _log_unassigned_skip(self, match_info, name, score):
+        now = time.time()
+        if now - self._unassigned_skip_log_ts < 10.0:
+            return
+        self._unassigned_skip_log_ts = now
+        self.log(f"⏭ [跳过] 列表中存在未分配航班（需人工处理），已忽略 {match_info['name']} 分值{score:.2f} 命中{name}")
+
     def _scan_tasks_ultra_fast(self, screen):
         """超快速任务检测：单帧内并行匹配所有任务类型，返回匹配列表。
         
@@ -4102,6 +4162,12 @@ class WoaBot:
                 row.append(all_matches[j])
                 j += 1
             best = max(row, key=lambda d: d['score'])
+            if self.enable_skip_unassigned:
+                name, score = self._match_unassigned_slot(screen, best['center'][1])
+                if score >= self.UNASSIGNED_MATCH_CONF:
+                    self._log_unassigned_skip(best, name, score)
+                    i = j
+                    continue
             final.append(best)
             i = j
         return final
