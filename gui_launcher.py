@@ -2009,7 +2009,7 @@ class Application(ttkb.Window):
         pad = 8
         top_row = ttkb.Frame(self.container_mini, padding=4)
         top_row.pack(fill=X, padx=pad, pady=(pad, 0))
-        ttkb.Label(top_row, text=f"✈ WOA Mini {LOCAL_VERSION}",
+        ttkb.Label(top_row, text="✈ WOA Mini",
                    font=(DEFAULT_FONT, 10, "bold"), bootstyle="primary").pack(side=LEFT)
         ttkb.Button(top_row, text="⤢ 还原", bootstyle="outline-warning",
                     command=self.toggle_mode, padding=(6, 1)).pack(side=RIGHT)
