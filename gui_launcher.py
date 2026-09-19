@@ -741,7 +741,7 @@ class Application(ttkb.Window):
         self.var_anti_stuck_threshold = tk.StringVar(value=str(self.config.get("anti_stuck_threshold", 6)))
         self.var_leave_auto_pause = tk.BooleanVar(value=bool(self.config.get("leave_auto_pause", False)))
         self.var_route_pause = tk.BooleanVar(value=bool(self.config.get("route_auto_pause", False)))
-        self.var_skip_unassigned = tk.BooleanVar(value=bool(self.config.get("skip_unassigned", False)))
+        self.var_skip_unassigned = tk.BooleanVar(value=bool(self.config.get("skip_unassigned", True)))
         self.var_route_back_minutes = tk.StringVar(value=str(self.config.get("route_back_minutes", 5)))
         self.var_error_restart = tk.BooleanVar(value=bool(self.config.get("error_restart_enabled", False)))
         self.var_error_restart_threshold = tk.StringVar(value=str(self.config.get("error_restart_threshold", 10)))
@@ -3996,7 +3996,7 @@ class Application(ttkb.Window):
         self.create_info_icon(f_skip_unassigned,
                               "识别右侧列表中未分配航线的飞机（目的地栏为红色 -- 、国旗位为未分配徽标），\n"
                               "这类飞机需要你手动指派，脚本不再点击其卡片，避免空跑和误判为卡死。\n"
-                              "默认关闭。若发现该做的任务被跳过，可关闭此项反馈。").pack(side=LEFT, padx=5)
+                              "默认开启。若发现该做的任务被跳过，可关闭此项并反馈。").pack(side=LEFT, padx=5)
 
         f_s = ttkb.Frame(tab_runtime_right)
         f_s.pack(fill=X, pady=5)

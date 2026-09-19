@@ -346,7 +346,7 @@ class WoaBot:
         self._route_resume_next_time = 0.0
         self._route_resume_hits = 0
         # 跳过未分配航班：右侧列表里未分配航线的飞机需玩家手动处理，识别到就不当作任务点击
-        self.enable_skip_unassigned = False
+        self.enable_skip_unassigned = True
         self._unassigned_skip_log_ts = 0.0
         # 航线页无操作自动返回：getevent 触摸采样判定空闲，超时点返回键送回主界面
         self.route_back_minutes = 5
