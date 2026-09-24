@@ -752,7 +752,13 @@ class Application(ttkb.Window):
         self.var_speed_mode = tk.BooleanVar(value=self.config.get("speed_mode", False))
         self.var_skip_staff = tk.BooleanVar(value=self.config.get("skip_staff", False))
         self.var_delay_bribe = tk.BooleanVar(value=self.config.get("delay_bribe", False))
-        self.var_delay_count = tk.StringVar(value=str(self.config.get("auto_delay_count", 0)))
+        # 老配置里的 auto_delay_count（次数配额）>0 视为开启开关
+        try:
+            _legacy_delay_uses = int(self.config.get("auto_delay_count", 0) or 0)
+        except (TypeError, ValueError):
+            _legacy_delay_uses = 0
+        self.var_enable_auto_delay = tk.BooleanVar(
+            value=bool(self.config.get("auto_delay_enabled", _legacy_delay_uses > 0)))
         self.var_auto_delay_units = tk.StringVar(value=str(self.config.get("auto_delay_units", 3) or 3))
         self.var_random_task = tk.BooleanVar(value=self.config.get("random_task_order", True))
         self.var_no_takeoff_mode = tk.BooleanVar(value=self.config.get("no_takeoff_mode", False))
@@ -823,7 +829,7 @@ class Application(ttkb.Window):
         # ── 实时倒计时 ──
         self.var_next_logout_cd = tk.StringVar(value="—")
         self.var_tower_delay_cd = tk.StringVar(value="—")
-        self.var_auto_delay_left = tk.StringVar(value="0")
+        self.var_auto_delay_left = tk.StringVar(value="—")
         self.var_staff_avail = tk.StringVar(value="—")
         self._runtime_start_time = None
         
@@ -1444,10 +1450,7 @@ class Application(ttkb.Window):
         cat_sel = {c["key"]: bool(self.var_category_selection[c["key"]].get()) for c in SIDEBAR_CATEGORIES}
         self.config["category_selection"] = cat_sel
         self.config["initial_device_paths_detected"] = bool(self.config.get("initial_device_paths_detected", False))
-        try:
-            self.config["auto_delay_count"] = int(self.var_delay_count.get())
-        except (ValueError, TypeError):
-            self.config["auto_delay_count"] = 0
+        self.config["auto_delay_enabled"] = bool(self.var_enable_auto_delay.get())
         try:
             self.config["auto_delay_units"] = min(max(1, int(self.var_auto_delay_units.get())), 12)
         except (ValueError, TypeError):
@@ -1544,9 +1547,9 @@ class Application(ttkb.Window):
         else:
             self.var_staff_avail.set("—")
 
-        # 剩余延时次数
-        delay_left = getattr(bot, "auto_delay_count", 0) if bot else 0
-        self.var_auto_delay_left.set(str(delay_left))
+        # 塔台自动续延开关
+        delay_on = bool(getattr(bot, "enable_auto_delay", False)) if bot else False
+        self.var_auto_delay_left.set("开" if delay_on else "关")
 
         # ── 倒计时格式化 ──
         def _fmt_cd(deadline):
@@ -1565,7 +1568,7 @@ class Application(ttkb.Window):
             active = getattr(bot, "_tower_active_slots", [False]*4)
             active_n = sum(active)
             td = getattr(bot, "_tower_delay_deadline", 0)
-            cd_str = _fmt_cd(td) if td > 0 and delay_left > 0 else None
+            cd_str = _fmt_cd(td) if td > 0 and delay_on else None
             if active_n == 0:
                 base = "关闭"
             elif active_n == 4:
@@ -1609,7 +1612,7 @@ class Application(ttkb.Window):
         # 塔台延时倒计时
         if bot and getattr(bot, "running", False):
             td = getattr(bot, "_tower_delay_deadline", 0)
-            if td > 0 and getattr(bot, "auto_delay_count", 0) > 0:
+            if td > 0 and getattr(bot, "enable_auto_delay", False):
                 self.var_tower_delay_cd.set(_fmt_cd(td))
             elif td > 0:
                 self.var_tower_delay_cd.set("监控中")
@@ -1869,10 +1872,6 @@ class Application(ttkb.Window):
             staff = getattr(bot, "last_checked_avail_staff", None)
             if staff is not None and staff >= 0:
                 status_lines.append(f"可用地勤: {staff}")
-            # 延时次数
-            delay_left = getattr(bot, "auto_delay_count", 0)
-            if delay_left > 0:
-                status_lines.append(f"剩余延时: {delay_left} 次")
             # 塔台
             active = getattr(bot, "_tower_active_slots", [False]*4)
             active_n = sum(active)
@@ -1883,10 +1882,10 @@ class Application(ttkb.Window):
             else:
                 tw = f"{active_n}/4"
             td = getattr(bot, "_tower_delay_deadline", 0)
-            if td > 0 and delay_left > 0:
+            if td > 0 and getattr(bot, "enable_auto_delay", False):
                 remain = max(0, int(td - now))
                 m, s = divmod(remain, 60)
-                tw += f" ({m}分{s:02d}秒后延时)"
+                tw += f" ({m}分{s:02d}秒后续延)"
             status_lines.append(f"塔台: {tw}")
             # 下次小退
             logout_times = []
@@ -2666,7 +2665,7 @@ class Application(ttkb.Window):
         status_bg = c["elevated"] if self._theme_is_dark else c["surface"]
         status_items = [
             ("👥 可用地勤", self.var_staff_avail, c["success"]),
-            ("🔁 剩余延时", self.var_auto_delay_left, c["warning"]),
+            ("🔁 自动续延", self.var_auto_delay_left, c["warning"]),
             ("🗼 塔台状态", self.var_tower_status, c["info"]),
             ("📊 数据来源", self.var_stats_source, c["primary"]),
         ]
@@ -2801,8 +2800,8 @@ class Application(ttkb.Window):
         tab2 = ttkb.Frame(notebook, padding=(10, 8))
         notebook.add(tab2, text=" 挂机 ")
         _section_label(tab2, "塔台自动延时")
-        _entry_row(tab2, "延时控制器：", self.var_delay_count,
-                   "应用", self.on_confirm_tower_delay, "0=关闭延时，最大144次")
+        _toggle(tab2, "🗼 塔台自动续延", self.var_enable_auto_delay,
+                "按下面的间隔自动进塔台续延\n关闭时只监控塔台状态，不点击任何按钮")
         _entry_row(tab2, "续延间隔：", self.var_auto_delay_units,
                    "应用", self.on_confirm_delay_units,
                    "单位=10分钟：每 N 档进塔台延长 N 档时长（默认 3 档=30 分钟）；"
@@ -4356,6 +4355,8 @@ class Application(ttkb.Window):
                 changed.append(("航线管理界面自动暂停", "开" if self.config.get("route_auto_pause") else "关"))
             if old_cfg.get("skip_unassigned") != self.config.get("skip_unassigned"):
                 changed.append(("跳过未分配航班", "开" if self.config.get("skip_unassigned") else "关"))
+            if old_cfg.get("auto_delay_enabled") != self.config.get("auto_delay_enabled"):
+                changed.append(("塔台自动续延", "开" if self.config.get("auto_delay_enabled") else "关"))
             if old_cfg.get("route_back_minutes") != self.config.get("route_back_minutes"):
                 changed.append(("航线页无操作自动返回", f"{self.config.get('route_back_minutes', 5)} 分钟"))
             if old_cfg.get("error_restart_enabled") != self.config.get("error_restart_enabled"):
@@ -4632,7 +4633,7 @@ class Application(ttkb.Window):
             self.var_tower_status.set("—")
             self.var_next_logout_cd.set("—")
             self.var_tower_delay_cd.set("—")
-            self.var_auto_delay_left.set("0")
+            self.var_auto_delay_left.set("—")
             self.var_staff_avail.set("—")
             self.after(1000, self._update_runtime_stats)
             self.var_runtime_status.set("运行中")
@@ -4683,7 +4684,7 @@ class Application(ttkb.Window):
         self.var_tower_status.set("—")
         self.var_next_logout_cd.set("—")
         self.var_tower_delay_cd.set("—")
-        self.var_auto_delay_left.set("0")
+        self.var_auto_delay_left.set("—")
         self.var_staff_avail.set("—")
         if not getattr(self, "_is_closing", False):
             for btn in [self.btn_main_start, self.btn_mini_start]:
@@ -4718,14 +4719,6 @@ class Application(ttkb.Window):
                 btn.configure(text="▶  继 续")
             print(">>> [暂停] 脚本已暂停")
 
-    def on_confirm_tower_delay(self):
-        self.sync_all_configs_to_bot()
-        val_str = self.var_delay_count.get()
-        if val_str == "0":
-            print(f">>> [配置] 自动延时塔台: 已关闭")
-        else:
-            print(f">>> [配置] 自动延时塔台: 已更新为 {val_str} 次")
-
     def on_confirm_delay_units(self):
         try:
             units = int(self.var_auto_delay_units.get())
@@ -4748,16 +4741,6 @@ class Application(ttkb.Window):
 
     def sync_all_configs_to_bot(self, from_advanced_save=False):
         no_log = from_advanced_save
-        try:
-            cnt = int(self.var_delay_count.get())
-            if cnt < 0:
-                cnt = 0
-            elif cnt > 144:
-                cnt = 144
-        except ValueError:
-            cnt = self.config.get("auto_delay_count", 0)
-        self.var_delay_count.set(str(cnt))
-        self.config["auto_delay_count"] = cnt
         try:
             delay_units = int(self.var_auto_delay_units.get())
         except ValueError:
@@ -4806,7 +4789,7 @@ class Application(ttkb.Window):
             self.bot.set_speed_mode(self.var_speed_mode.get())
             self.bot.set_skip_staff_verify(self.var_skip_staff.get())
             self.bot.set_delay_bribe(self.var_delay_bribe.get())
-            self.bot.set_auto_delay(cnt)
+            self.bot.set_auto_delay_enabled(self.var_enable_auto_delay.get())
             self.bot.set_auto_delay_units(delay_units)
             self.bot.set_random_task_mode(self.var_random_task.get(), log_change=not no_log)
             self.bot.set_slide_duration_range(
@@ -4840,8 +4823,11 @@ class Application(ttkb.Window):
 
     def on_bot_config_update(self, key, value):
         def _apply_update():
-            if key == "auto_delay_count":
-                self.var_delay_count.set(str(value))
+            if key == "auto_delay_enabled":
+                # bot 侧连续失败自动关开关 → 同步 UI 与配置
+                self.var_enable_auto_delay.set(bool(value))
+                self.config["auto_delay_enabled"] = bool(value)
+                self.save_config()
             elif key == "vehicle_buy":
                 self.var_vehicle_buy.set(bool(value))
             elif key == "paused":

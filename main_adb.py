@@ -405,7 +405,9 @@ class WoaBot:
         self.STUCK_TIMEOUT = 28.0
         self._interface_check_interval = 0.35
         self._next_interface_check_time = 0.0
-        self.auto_delay_count = 0
+        self.enable_auto_delay = False
+        self._delay_fail_streak = 0
+        self.DELAY_FAIL_LIMIT = 5   # 连续失败这么多轮就自动关开关，避免无限重试烧银币
         self.TOWER_CHECK_POINTS = [(656, 809), (634, 831), (634, 809), (656, 830)]
         # BGR: 红(需延时) 绿(无需延时) 灰(塔台关闭)
         self.TOWER_RED_BGR = (110, 112, 251)
@@ -1600,17 +1602,18 @@ class WoaBot:
         self.enable_skip_staff = enabled
         self.log(f">>> [配置] 跳过地勤验证: {'已开启' if enabled else '已关闭'}")
 
-    def set_auto_delay(self, count):
-        count = int(count)
-        old_count = self.auto_delay_count
-        self.auto_delay_count = count
-        # 如果从禁用变为启用，重新初始化塔台状态
-        if old_count <= 0 and count > 0:
-            self.log(f">>> [配置] 自动延时塔台已启用 ({count} 次)，重新初始化塔台状态")
+    def set_auto_delay_enabled(self, enabled):
+        """塔台自动续延开关：开=按间隔自动续延，关=只监控塔台状态（仍影响筛选策略）。"""
+        enabled = bool(enabled)
+        if self.enable_auto_delay == enabled:
+            return
+        self.enable_auto_delay = enabled
+        self.log(f">>> [配置] 塔台自动续延: {'已开启' if enabled else '已关闭'}")
+        if enabled:
             self._tower_disabled = False
-            self._tower_delay_deadline = 0.0  # 触发重新检查
-        elif old_count > 0 and count <= 0:
-            self.log(f">>> [配置] 自动延时塔台已关闭")
+            self._delay_fail_streak = 0
+            self._tower_delay_deadline = 0.0      # 触发一次重新初始化
+        else:
             self._tower_delay_deadline = 0.0
 
     def _delay_interval_minutes(self):
@@ -1633,7 +1636,7 @@ class WoaBot:
         interval = self._delay_interval_minutes()
         self.log(f">>> [配置] 塔台自动续延: 每 {interval} 分钟延长 {interval} 分钟"
                  + ("（档位未设置，按默认 30 分钟）" if units <= 0 else ""))
-        if self.auto_delay_count > 0 and not self._tower_disabled:
+        if self.enable_auto_delay and not self._tower_disabled:
             self._tower_delay_deadline = time.time() + interval * 60
             self.log(f"🗼 [塔台] 下一次续延排在 {interval} 分钟后")
 
@@ -2871,7 +2874,7 @@ class WoaBot:
         valid_times = [t for t, a in zip(times, active) if a]
         min_time = min(valid_times)
         max_time = max(valid_times)
-        if self.auto_delay_count > 0:
+        if self.enable_auto_delay:
             # 任意活跃控制器 < 3min → 立即「全部激活」
             urgent_slots = [i+1 for i in range(4) if active[i] and times[i] is not None and times[i] < 180]
             if urgent_slots:
@@ -2884,7 +2887,7 @@ class WoaBot:
             trigger_in = max(0, min(min_time - 180, interval_sec))
             self._tower_delay_deadline = time.time() + trigger_in
             mins, secs = divmod(int(min_time), 60)
-            self.log(f"🗼 [塔台] 自动延时(剩余{self.auto_delay_count}次)，活跃: [{slots_str}]")
+            self.log(f"🗼 [塔台] 自动续延已启用，活跃: [{slots_str}]")
             self.log(f"🗼 [塔台] 最短剩余 {mins}m{secs}s，将在 {int(trigger_in)}s 后触发续延检查")
         else:
             # 自动延时未开启：在最长时间到期后+10s 再打开菜单确认状态
@@ -2897,13 +2900,13 @@ class WoaBot:
 
     def _check_tower_countdown(self):
         """定期检查塔台倒计时：
-        - 监控模式 (delay=0): 打开菜单确认塔台状态，更新活跃槽位
-        - 延时模式 (delay>0): 到期 → 打开菜单 → 点击「全部激活」"""
+        - 监控模式（开关关闭）: 打开菜单确认塔台状态，更新活跃槽位
+        - 续延模式（开关开启）: 到间隔 → 打开菜单 → 校准 → 点击「全部激活」"""
         monitor_start = time.time()
         monitor_budget = self.TOWER_MONITOR_MAX_SEC
 
         if self._tower_delay_deadline <= 0:
-            if self.auto_delay_count > 0:
+            if self.enable_auto_delay:
                 try:
                     self._init_tower_countdown()
                 except Exception as e:
@@ -2923,7 +2926,7 @@ class WoaBot:
         self._tower_delay_deadline = 0.0
 
         # ─── 监控模式：仅确认塔台状态 ───
-        if self.auto_delay_count <= 0:
+        if not self.enable_auto_delay:
             self.log("🗼 [塔台] 监控到期，打开菜单确认状态...")
             times = self._read_tower_times(open_menu=True, fast=True,
                                            budget_start=monitor_start, budget_sec=monitor_budget)
@@ -3203,38 +3206,31 @@ class WoaBot:
                     ok = self._check_delay_by_ocr(pre_times)
 
         if not ok:
-            self.log("🗼 [塔台] ❌ 全部重试失败，30s 后再次尝试")
-            self._tower_delay_deadline = time.time() + 30
+            self._delay_fail_streak += 1
+            if self._delay_fail_streak >= self.DELAY_FAIL_LIMIT:
+                self.enable_auto_delay = False
+                self._delay_fail_streak = 0
+                if self.config_callback:
+                    self.config_callback("auto_delay_enabled", False)
+                # 关掉续延但保留状态监控：塔台活跃与否仍驱动筛选策略
+                self._tower_delay_deadline = time.time() + 60
+                self.log(f"🗼 [塔台] ❌ 连续 {self.DELAY_FAIL_LIMIT} 轮续延失败，"
+                         f"已自动关闭塔台自动续延，请检查银币余额/塔台界面后手动开启")
+            else:
+                self.log(f"🗼 [塔台] ❌ 重试失败（连续第 {self._delay_fail_streak} 轮），30s 后再次尝试")
+                self._tower_delay_deadline = time.time() + 30
             self._close_tower_menu()
             return
 
-        self.auto_delay_count -= 1
-        if self.config_callback:
-            self.config_callback("auto_delay_count", self.auto_delay_count)
-        self.log(f"🗼 [塔台] ✅ 全部激活完成，剩余延时次数: {self.auto_delay_count}")
+        self._delay_fail_streak = 0
         self.sleep(1.0)
-
-        if self.auto_delay_count > 0:
-            self._tower_delay_deadline = time.time() + target * 60
-            self.log(f"🗼 [塔台] 下一次续延排在 {target} 分钟后")
-            self._close_tower_menu()
-            return
-
-        # 次数用完 → 降级为监控模式：等最后一个控制器自然到期后再确认状态
-        times = self._read_tower_times(open_menu=False)
-        valid_times = [t for t, a in zip(times, self._tower_active_slots) if a and t is not None and t > 0]
-        if valid_times:
-            trigger_in = max(valid_times) + 10
-            self._tower_delay_deadline = time.time() + trigger_in
-            self.log(f"🗼 [塔台] 延时次数用完，监控模式，{int(trigger_in)}s 后确认状态")
-        else:
-            self._tower_delay_deadline = 0.0
-            self.log("🗼 [塔台] ⚠️ 未读到有效时间")
+        self._tower_delay_deadline = time.time() + target * 60
+        self.log(f"🗼 [塔台] ✅ 全部激活完成，下一次续延排在 {target} 分钟后")
         self._close_tower_menu()
 
     def _check_and_perform_auto_delay(self, screen=None):
         """红灯最高优先级检测：发现任意塔台红灯 → 立即打开菜单 → 点击「全部激活」。"""
-        if self.auto_delay_count <= 0 or self._tower_disabled:
+        if not self.enable_auto_delay or self._tower_disabled:
             return False
         if time.time() < self.doing_task_forbidden_until:
             return False
