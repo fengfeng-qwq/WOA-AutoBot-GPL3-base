@@ -452,8 +452,9 @@ class WoaBot:
         self._tower_none_read_count = 0
         # 塔台监测硬预算：从触发监测到得出结果，目标压到 2s 内。
         self.TOWER_MONITOR_MAX_SEC = 2.0
-        # 初始化读菜单 OCR 的硬预算：读不到内容时不能把主循环卡死几十秒
-        self.TOWER_INIT_READ_MAX_SEC = 12.0
+        # 初始化读菜单 OCR 的硬预算：读不到内容时不能把主循环卡死几十秒。
+        # 必须明显大于「fast 模式读完四行」的实际耗时，否则后面的行会被饿死成 None
+        self.TOWER_INIT_READ_MAX_SEC = 20.0
         # 看不到塔台图标 / 塔台关闭且未开自动续延时，多久后再确认一次
         self.TOWER_ICON_RETRY_SEC = 30.0
         self.TOWER_OFF_RETRY_SEC = 300.0
@@ -2882,7 +2883,10 @@ class WoaBot:
             self._close_tower_menu()
             return
         read_start = time.time()
-        times = self._read_tower_times(open_menu=False, budget_start=read_start,
+        # 必须用 fast：非 fast 每行要 12 次 OCR（约 6s），四行读满要 24s，
+        # 任何小于它的预算都会让后面的行被"饿死"成 None（曾误报只识别到 1/2 号）
+        times = self._read_tower_times(open_menu=False, fast=True,
+                                       budget_start=read_start,
                                        budget_sec=self.TOWER_INIT_READ_MAX_SEC)
         # 判断活跃状态
         active = [t is not None and t > 0 for t in times]
