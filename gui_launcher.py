@@ -106,6 +106,35 @@ _MUMU_PORTS = MUMU_PORTS  # 向后兼容别名
 # 数据存储路径（开发模式：当前目录；打包后：系统 Application Support）
 _DATA_BASE = get_app_data_dir()
 
+# === 文档窗口滚轮步长 ===========================================
+# Windows 的滚轮本身就是按行步进而非像素平滑，它的规范做法是尊重系统设置
+# 「每次滚动要滚动的行数」(SPI_GETWHEELSCROLLLINES，默认 3)。tk.Text 的 yview
+# 只能按行定位，所以这里按系统行数滚动，并拆成逐帧步进以获得接近 WinUI 的滑动观感。
+_WHEEL_SPI_GET_LINES = 0x0068
+_WHEEL_LINES_DEFAULT = 3
+_WHEEL_FRAME_MS = 16
+
+
+def _wheel_scroll_lines():
+    """返回 (每格滚轮的行数, 是否整页滚动)。读不到系统设置时按 3 行。"""
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            buf = ctypes.c_uint32(0)
+            ok = ctypes.windll.user32.SystemParametersInfoW(
+                _WHEEL_SPI_GET_LINES, 0, ctypes.byref(buf), 0)
+            if ok:
+                value = buf.value
+                if value == 0xFFFFFFFF:      # -1 = 整页
+                    return 0, True
+                if value == 0:               # 0 = 系统里已关闭滚轮滚动
+                    return 0, False
+                return min(int(value), 32), False
+        except Exception:
+            pass
+    return _WHEEL_LINES_DEFAULT, False
+
+
 # === 只读 Text 控件剪贴板补丁 =================================
 # Tk 的 Text 控件在 state="disabled" 时会禁用系统复制粘贴快捷键
 # （Cmd+C/Ctrl+C）。这在 macOS Aqua Tk 9.x 上尤其明显。
@@ -2994,6 +3023,7 @@ class Application(ttkb.Window):
         text_area.insert("end", "正在加载...\n")
         text_area.configure(state="disabled")
         _enable_copy_for_disabled_text(text_area)
+        self._bind_doc_wheel(text_area)
         self._center_toplevel_on_parent(win)
 
         def _fill():
@@ -3057,6 +3087,45 @@ class Application(ttkb.Window):
         ttkb.Checkbutton(header, text="显示源码", variable=var, bootstyle="primary-round-toggle",
                          command=lambda: text_area._md_paint()).pack(side=RIGHT)
 
+    def _bind_doc_wheel(self, text_area):
+        """文档窗口滚轮：一格滚动系统设定的行数（Windows 默认 3 行），逐帧步进。"""
+        lines_per_notch, page_mode = _wheel_scroll_lines()
+        state = {"pending": 0, "job": None}
+
+        def _step():
+            state["job"] = None
+            if not text_area.winfo_exists() or state["pending"] == 0:
+                return
+            move = 1 if state["pending"] > 0 else -1
+            text_area.yview_scroll(move, "units")
+            state["pending"] -= move
+            if state["pending"]:
+                state["job"] = text_area.after(_WHEEL_FRAME_MS, _step)
+
+        def _push(notches):
+            want = notches * (lines_per_notch or 1)
+            if state["pending"] and (want > 0) != (state["pending"] > 0):
+                state["pending"] = 0      # 反向时立即改向，不来回抵消
+            state["pending"] = max(-96, min(96, state["pending"] + want))
+            if state["job"] is None:
+                _step()
+
+        def _on_wheel(event):
+            if page_mode:
+                text_area.yview_scroll(1 if event.delta > 0 else -1, "pages")
+                return "break"
+            if not lines_per_notch:
+                return "break"
+            notches = int(event.delta / 120)          # Windows: 一格 ±120
+            if not notches:                           # macOS 触控板给的是小整数
+                notches = 1 if event.delta > 0 else -1
+            _push(notches)
+            return "break"
+
+        text_area.bind("<MouseWheel>", _on_wheel)
+        text_area.bind("<Button-4>", lambda _e: (_push(1), "break")[1])
+        text_area.bind("<Button-5>", lambda _e: (_push(-1), "break")[1])
+
     def _open_online_announcement_window(self):
         """公告窗口：从项目根目录读取 ANNOUNCEMENT.md 并展示。"""
         c = self._clr
@@ -3092,6 +3161,7 @@ class Application(ttkb.Window):
         if MD_AVAILABLE:
             self._add_source_toggle(header, text_area)
         _enable_copy_for_disabled_text(text_area)
+        self._bind_doc_wheel(text_area)
 
         status_label.configure(text="正在获取 GitHub 在线公告…（当前显示本地内容）")
         self._fetch_announcement_online(status_label, text_area)
@@ -3189,6 +3259,7 @@ class Application(ttkb.Window):
         if MD_AVAILABLE:
             self._add_source_toggle(header, text_area)
         _enable_copy_for_disabled_text(text_area)
+        self._bind_doc_wheel(text_area)
         self._center_toplevel_on_parent(win)
         # 将窗口置顶
         win.lift()
