@@ -452,6 +452,11 @@ class WoaBot:
         self._tower_none_read_count = 0
         # 塔台监测硬预算：从触发监测到得出结果，目标压到 2s 内。
         self.TOWER_MONITOR_MAX_SEC = 2.0
+        # 初始化读菜单 OCR 的硬预算：读不到内容时不能把主循环卡死几十秒
+        self.TOWER_INIT_READ_MAX_SEC = 12.0
+        # 看不到塔台图标 / 塔台关闭且未开自动续延时，多久后再确认一次
+        self.TOWER_ICON_RETRY_SEC = 30.0
+        self.TOWER_OFF_RETRY_SEC = 300.0
         self.FILTER_MENU_BTN = (1537, 37)
         # 菜单按钮仍用像素检测（展开=深色，折叠=浅色）
         self.COLOR_LIGHT = (203, 191, 179)
@@ -2817,6 +2822,30 @@ class WoaBot:
             self.log("🗼 [塔台] 未找到返回按钮，使用 close_window 关闭")
             self.close_window()
 
+    def _handle_tower_found_closed(self, menu_open):
+        """发现塔台处于关闭状态后的分流。
+
+        开了自动续延 → 塔台关闭不是终态：立刻走一次续延流程，由它点「全部激活」把塔台开起来。
+        不起飞模式除外——该模式刻意只开 4 号控制器，全开会改变用户设定的行为。
+        没开自动续延 → 标记关闭并长退避，避免主循环每圈重入初始化。
+        """
+        if menu_open:
+            self._close_tower_menu()
+        if self.enable_no_takeoff_mode:
+            self.log("⚠️ [塔台] 不起飞模式已开启，不自动全开塔台（该模式建议只开 4 号控制器），请手动设置")
+            self._tower_disabled = True
+            self._tower_delay_deadline = time.time() + self.TOWER_OFF_RETRY_SEC
+            return
+        if self.enable_auto_delay:
+            self._tower_disabled = False
+            self._tower_delay_deadline = time.time()   # 下一循环立即尝试全部激活
+            self.log("🗼 [塔台] 自动续延已开启，马上尝试「全部激活」打开塔台")
+            return
+        self._tower_disabled = True
+        self._tower_delay_deadline = time.time() + self.TOWER_OFF_RETRY_SEC
+        self.log("🗼 [塔台] 自动续延未开启，%.0f 分钟后再确认塔台状态"
+                 % (self.TOWER_OFF_RETRY_SEC / 60.0))
+
     def _init_tower_countdown(self):
         """启动时读取塔台倒计时，判断哪些控制器活跃，设置定时器。
         先通过 tower.png 可见性 + 像素灰度判断塔台是否关闭，避免不必要的菜单操作。"""
@@ -2830,18 +2859,17 @@ class WoaBot:
             self.sleep(0.5)
             icon_visible = self._is_tower_icon_visible()
         if not icon_visible:
-            # 关窗后仍不可见，无法确认塔台状态，跳过
-            self.log("🗼 [塔台] 关窗后塔台图标仍不可见，无法确认塔台状态，跳过初始化")
+            # 关窗后仍不可见，无法确认塔台状态：留一个正的退避时间，否则主循环会每圈重入这里
+            self._tower_delay_deadline = time.time() + self.TOWER_ICON_RETRY_SEC
+            self.log("🗼 [塔台] 关窗后塔台图标仍不可见，无法确认塔台状态，%.0fs 后重试"
+                     % self.TOWER_ICON_RETRY_SEC)
             return
         # 第二步：图标可见，用像素检测判断塔台是否全灰（关闭）
         screen = self.adb.get_screenshot()
         if screen is not None and self._is_tower_off(screen):
-            self._tower_disabled = True
-            self._tower_delay_deadline = 0.0
             self._tower_active_slots = [False, False, False, False]
-            self.log("🗼 [塔台] 塔台图标全灰，判定塔台已关闭，不打开菜单")
-            if self.enable_no_takeoff_mode:
-                self.log("⚠️ [塔台] 不起飞模式已开启但塔台未开启，建议打开塔台控制器4以处理推出")
+            self.log("🗼 [塔台] 塔台图标全灰，判定塔台已关闭")
+            self._handle_tower_found_closed(menu_open=False)
             return
         if not self._is_main_interface_ready(retries=2, interval=0.15):
             self._tower_delay_deadline = time.time() + 12.0
@@ -2853,19 +2881,23 @@ class WoaBot:
             self.log("🗼 [塔台] ⚠️ 菜单打开失败，跳过初始化")
             self._close_tower_menu()
             return
-        times = self._read_tower_times(open_menu=False)
+        read_start = time.time()
+        times = self._read_tower_times(open_menu=False, budget_start=read_start,
+                                       budget_sec=self.TOWER_INIT_READ_MAX_SEC)
         # 判断活跃状态
         active = [t is not None and t > 0 for t in times]
         active_count = sum(active)
         self.log(f"🗼 [塔台] OCR 结果: {times}，活跃数: {active_count}/4")
         if active_count == 0:
-            self._tower_disabled = True
-            self._tower_delay_deadline = 0.0
+            if time.time() - read_start >= self.TOWER_INIT_READ_MAX_SEC:
+                # 是被预算截断的，不能据此判定塔台关闭
+                self._tower_delay_deadline = time.time() + self.TOWER_ICON_RETRY_SEC
+                self.log("🗼 [塔台] 初始化读取超时，%.0fs 后重试" % self.TOWER_ICON_RETRY_SEC)
+                self._close_tower_menu()
+                return
             self._tower_active_slots = [False, False, False, False]
-            self.log("🗼 [塔台] 四个控制器均未开启，塔台已关闭，以后不再打开菜单")
-            if self.enable_no_takeoff_mode:
-                self.log("⚠️ [塔台] 不起飞模式已开启但塔台未开启，建议打开塔台控制器4以获得最佳效果")
-            self._close_tower_menu()
+            self.log("🗼 [塔台] 四个控制器均未开启，塔台已关闭")
+            self._handle_tower_found_closed(menu_open=True)
             return
         self._tower_active_slots = active
         self._tower_disabled = False
@@ -2911,7 +2943,8 @@ class WoaBot:
                     self._init_tower_countdown()
                 except Exception as e:
                     self.log(f"🗼 [塔台] ⚠️ 重新初始化失败: {e}")
-            if self._tower_delay_deadline <= 0 or self._tower_disabled:
+            # 塔台关闭不再是终态：靠 deadline 退避节流，到点仍要复查（可能已被玩家打开）
+            if self._tower_delay_deadline <= 0:
                 return False
         if time.time() < self._tower_delay_deadline:
             return False
@@ -2976,13 +3009,16 @@ class WoaBot:
                 self._tower_delay_deadline = time.time() + 8.0
                 self._close_tower_menu(fast=True)
                 return True
-            self._tower_disabled = True
             self._tower_active_slots = [False, False, False, False]
-            self.log("🗼 [塔台] 全部关闭")
+            self.log("🗼 [塔台] 检测到塔台已关闭")
             if self._tower_was_active and self.enable_cancel_stand_filter:
                 self._tower_off_force_mode1 = True
-            self._close_tower_menu(fast=True)
-            return True
+            if self.enable_no_takeoff_mode:
+                # 不起飞模式刻意只开 4 号控制器，不自动全开
+                self._handle_tower_found_closed(menu_open=True)
+                return True
+            # 自动续延已开启 → 塔台关闭不是终态，继续往下走「全部激活」把它开起来
+            self._tower_disabled = False
 
         self._tower_active_slots = active
         self.log(f"🗼 [塔台] 活跃: {[i+1 for i,a in enumerate(active) if a]}，OCR: {times}")
@@ -3223,6 +3259,9 @@ class WoaBot:
             return
 
         self._delay_fail_streak = 0
+        # 「全部激活」成功即说明塔台已被打开
+        self._tower_disabled = False
+        self._tower_was_active = True
         self.sleep(1.0)
         self._tower_delay_deadline = time.time() + target * 60
         self.log(f"🗼 [塔台] ✅ 全部激活完成，下一次续延排在 {target} 分钟后")
