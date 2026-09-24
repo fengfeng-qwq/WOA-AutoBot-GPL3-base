@@ -3112,19 +3112,19 @@ class Application(ttkb.Window):
 
         def _on_wheel(event):
             if page_mode:
-                text_area.yview_scroll(1 if event.delta > 0 else -1, "pages")
+                text_area.yview_scroll(-1 if event.delta > 0 else 1, "pages")
                 return "break"
             if not lines_per_notch:
                 return "break"
             notches = int(event.delta / 120)          # Windows: 一格 ±120
             if not notches:                           # macOS 触控板给的是小整数
                 notches = 1 if event.delta > 0 else -1
-            _push(notches)
+            _push(-notches)   # Tk 的 Text 默认绑定是「正 delta 向上」，这里保持同向
             return "break"
 
         text_area.bind("<MouseWheel>", _on_wheel)
-        text_area.bind("<Button-4>", lambda _e: (_push(1), "break")[1])
-        text_area.bind("<Button-5>", lambda _e: (_push(-1), "break")[1])
+        text_area.bind("<Button-4>", lambda _e: (_push(-1), "break")[1])   # 滚轮上
+        text_area.bind("<Button-5>", lambda _e: (_push(1), "break")[1])    # 滚轮下
 
     def _open_online_announcement_window(self):
         """公告窗口：从项目根目录读取 ANNOUNCEMENT.md 并展示。"""
