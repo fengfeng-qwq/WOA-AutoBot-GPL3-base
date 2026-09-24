@@ -16,6 +16,9 @@ Pillow>=10.0
 # 现代 UI 框架
 ttkbootstrap>=1.20.0
 
+# 公告 / 使用说明的 Markdown 渲染（纯 Python，无二进制依赖）
+markdown>=3.5
+
 # XML / 网络
 lxml>=5.0
 requests>=2.28.0

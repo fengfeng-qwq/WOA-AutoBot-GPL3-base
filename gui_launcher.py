@@ -63,6 +63,7 @@ from core import (
     SIDEBAR_CATEGORIES,
     DEFAULT_FONT, MONO_FONT, MUMU_PORTS,
 )
+from core.md_view import MD_AVAILABLE, render_markdown
 
 try:
     import orjson
@@ -3004,6 +3005,57 @@ class Application(ttkb.Window):
         # 内容已在内存中，无需后台线程加载；使用线程安全队列调度到主线程执行
         self._call_main_thread(_fill)
 
+    def _paint_doc(self, text_area, content, show_source):
+        """把 Markdown 文档画进只读文本区；勾选源码或 markdown 依赖缺失时显示原文。"""
+        if not show_source and render_markdown(text_area, content, self._clr,
+                                               ui_font=DEFAULT_FONT,
+                                               mono_font=MONO_FONT, base_size=10):
+            text_area.configure(state="disabled")
+            return
+        text_area.configure(state="normal")
+        text_area.delete("1.0", END)
+        text_area.insert("end", content)
+        text_area.configure(state="disabled")
+
+    def _make_doc_painter(self, text_area, initial_md):
+        """公告 / 使用说明窗口共用的重绘入口。
+
+        在线公告热替换与「显示源码」切换都走这里，避免两处各写一份渲染逻辑。
+        """
+        box = {"md": initial_md}
+
+        def paint(md=None):
+            if md is not None:
+                box["md"] = md
+            var = getattr(text_area, "_md_source_var", None)
+            self._paint_doc(text_area, box["md"], bool(var.get()) if var else False)
+            text_area.see("1.0")
+
+        text_area._md_paint = paint
+        return paint
+
+    def _read_doc_file(self, md_filename):
+        """读取随包 .md 文档，优先 get_resource_path 以兼容 PyInstaller _MEIPASS。"""
+        try:
+            md_path = get_resource_path(md_filename)
+            if md_path and os.path.isfile(md_path):
+                with open(md_path, "r", encoding="utf-8") as f:
+                    return f.read()
+            fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), md_filename)
+            if os.path.isfile(fallback):
+                with open(fallback, "r", encoding="utf-8") as f:
+                    return f.read()
+            return f"⚠️ 未找到文件: {md_filename}\n已搜索: {md_path}"
+        except Exception as e:
+            return f"⚠️ 读取内容失败: {e}"
+
+    def _add_source_toggle(self, header, text_area):
+        """文档窗口右上角的「显示源码」开关。"""
+        var = tk.BooleanVar(value=False)
+        text_area._md_source_var = var
+        ttkb.Checkbutton(header, text="显示源码", variable=var, bootstyle="primary-round-toggle",
+                         command=lambda: text_area._md_paint()).pack(side=RIGHT)
+
     def _open_online_announcement_window(self):
         """公告窗口：从项目根目录读取 ANNOUNCEMENT.md 并展示。"""
         c = self._clr
@@ -3034,23 +3086,10 @@ class Application(ttkb.Window):
         scroll.pack(side=RIGHT, fill=Y)
         text_area.config(yscrollcommand=scroll.set)
 
-        # 先读取本地 ANNOUNCEMENT.md 立即展示，随后后台尝试 GitHub 在线公告
-        try:
-            md_path = get_resource_path("ANNOUNCEMENT.md")
-            if md_path and os.path.isfile(md_path):
-                with open(md_path, "r", encoding="utf-8") as f:
-                    text_area.insert("end", f.read())
-            else:
-                fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ANNOUNCEMENT.md")
-                if os.path.isfile(fallback):
-                    with open(fallback, "r", encoding="utf-8") as f:
-                        text_area.insert("end", f.read())
-                else:
-                    text_area.insert("end", "⚠️ 无法加载公告内容。")
-        except Exception as e:
-            text_area.insert("end", f"⚠️ 加载公告失败: {e}")
-
-        text_area.configure(state="disabled")
+        # 先展示本地 ANNOUNCEMENT.md，随后后台尝试 GitHub 在线公告
+        self._make_doc_painter(text_area, self._read_doc_file("ANNOUNCEMENT.md"))()
+        if MD_AVAILABLE:
+            self._add_source_toggle(header, text_area)
         _enable_copy_for_disabled_text(text_area)
 
         status_label.configure(text="正在获取 GitHub 在线公告…（当前显示本地内容）")
@@ -3063,11 +3102,7 @@ class Application(ttkb.Window):
         try:
             if not text_area.winfo_exists():
                 return
-            text_area.configure(state="normal")
-            text_area.delete("1.0", END)
-            text_area.insert("end", content)
-            text_area.configure(state="disabled")
-            text_area.see("1.0")
+            text_area._md_paint(content)
             if status_label.winfo_exists():
                 status_label.configure(text=source_note)
         except Exception:
@@ -3132,7 +3167,8 @@ class Application(ttkb.Window):
         header.pack(fill=X)
         ttkb.Label(header, text=f"{icon} {title}", font=(DEFAULT_FONT, 16, "bold"),
                    foreground=c["primary"]).pack(anchor="w")
-        ttkb.Label(header, text=f"支持 Markdown 格式 · 版本 {LOCAL_VERSION}",
+        ttkb.Label(header, text=(f"Markdown 渲染视图 · 版本 {LOCAL_VERSION}" if MD_AVAILABLE
+                                 else f"版本 {LOCAL_VERSION}"),
                    font=(DEFAULT_FONT, 9),
                    foreground=c["text_sec"]).pack(anchor="w", pady=(2, 0))
 
@@ -3148,26 +3184,9 @@ class Application(ttkb.Window):
         scroll.pack(side=RIGHT, fill=Y)
         text_area.config(yscrollcommand=scroll.set)
 
-        # ── 读取 .md 文件（使用 get_resource_path 兼容 PyInstaller _MEIPASS）──
-        content = "⚠️ 无法加载内容，请确认程序文件完整。"
-        try:
-            md_path = get_resource_path(md_filename)
-            if md_path and os.path.isfile(md_path):
-                with open(md_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-            else:
-                # 回退：尝试当前目录
-                fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), md_filename)
-                if os.path.isfile(fallback):
-                    with open(fallback, "r", encoding="utf-8") as f:
-                        content = f.read()
-                else:
-                    content = f"⚠️ 未找到文件: {md_filename}\n已搜索: {md_path}\n和: {fallback}"
-        except Exception as e:
-            content = f"⚠️ 读取内容失败: {e}"
-
-        text_area.insert("end", content)
-        text_area.configure(state="disabled")
+        self._make_doc_painter(text_area, self._read_doc_file(md_filename))()
+        if MD_AVAILABLE:
+            self._add_source_toggle(header, text_area)
         _enable_copy_for_disabled_text(text_area)
         self._center_toplevel_on_parent(win)
         # 将窗口置顶
