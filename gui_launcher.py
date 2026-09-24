@@ -724,7 +724,7 @@ class Application(ttkb.Window):
         self.var_skip_staff = tk.BooleanVar(value=self.config.get("skip_staff", False))
         self.var_delay_bribe = tk.BooleanVar(value=self.config.get("delay_bribe", False))
         self.var_delay_count = tk.StringVar(value=str(self.config.get("auto_delay_count", 0)))
-        self.var_auto_delay_units = tk.StringVar(value=str(self.config.get("auto_delay_units", 0)))
+        self.var_auto_delay_units = tk.StringVar(value=str(self.config.get("auto_delay_units", 3) or 3))
         self.var_random_task = tk.BooleanVar(value=self.config.get("random_task_order", True))
         self.var_no_takeoff_mode = tk.BooleanVar(value=self.config.get("no_takeoff_mode", False))
         legacy_logout_interval = self.config.get("standalone_logout_interval")
@@ -1420,9 +1420,9 @@ class Application(ttkb.Window):
         except (ValueError, TypeError):
             self.config["auto_delay_count"] = 0
         try:
-            self.config["auto_delay_units"] = max(0, int(self.var_auto_delay_units.get()))
+            self.config["auto_delay_units"] = min(max(1, int(self.var_auto_delay_units.get())), 12)
         except (ValueError, TypeError):
-            self.config["auto_delay_units"] = 0
+            self.config["auto_delay_units"] = 3
         try:
             anti_stuck_threshold = int(self.var_anti_stuck_threshold.get())
             anti_stuck_threshold = max(3, min(20, anti_stuck_threshold))
@@ -2774,9 +2774,10 @@ class Application(ttkb.Window):
         _section_label(tab2, "塔台自动延时")
         _entry_row(tab2, "延时控制器：", self.var_delay_count,
                    "应用", self.on_confirm_tower_delay, "0=关闭延时，最大144次")
-        _entry_row(tab2, "延时档位：", self.var_auto_delay_units,
+        _entry_row(tab2, "续延间隔：", self.var_auto_delay_units,
                    "应用", self.on_confirm_delay_units,
-                   "单位=10分钟，0=跟随游戏滑条记忆；超出单次上限(2小时)自动连续续延")
+                   "单位=10分钟：每 N 档进塔台延长 N 档时长（默认 3 档=30 分钟）；"
+                   "上限 12 档=120 分钟（游戏滑条物理上限）。剩余时间已够撑到下一轮时自动跳过，不浪费银币")
         _section_label(tab2, "挂机策略", "info")
         _toggle(tab2, "🛩️ 不起飞模式", self.var_no_takeoff_mode,
                 "只处理降落+停机位，不处理起飞\n4号塔台单开时自动在待降落/停机位间轮切")
@@ -2933,8 +2934,8 @@ class Application(ttkb.Window):
 1. 推荐使用 uiautomator2 + ADB 方案。脚本运行速度主要取决于[截图方案]，运行速度如下：uiautomator2 >> ADB。
 2. 使用高速方案时，由于速度很快，出错会增多，非常不建议关闭"跳过二次校验"和"跳过地勤分配验证"开关。
 3. 脚本运行时必须保持游戏右侧筛选选项中，仅筛选出带有黄色感叹号的待处理飞机。但您无需担心！脚本可以自动检测并调整筛选状态（支持4按钮识图+模板匹配交叉验证）。
-4. 塔台自动延时：使用前请保证已开启塔台，并停留在可打开塔台菜单的主界面。脚本在控制器临近到期时自动点击[全部激活]并完成二次确认；设置[延时档位]后，每次延时前会把持续时间滑条拖到对应档位（超过单次上限2小时自动连续续延）。
-5. 延长的持续时间为累加制，费用以银币按实际延长时长结算，请留意[延时次数]配额与银币余额。
+4. 塔台自动续延：使用前请保证已开启塔台，并停留在可打开塔台菜单的主界面。脚本按[续延间隔]定时进入塔台，点击[全部激活]并把持续时间滑条拖到同一档位，完成二次确认。
+5. 续延前会先读一次剩余时间：若已够撑到下一轮则跳过本次，避免把银币花在用不上的时长上；费用以银币按实际延长时长结算，请留意银币余额。
 6. 2D/3D 视角自动切换：在策略面板开启后，脚本每15秒检测并自动切换游戏视角。
 7. 右侧类别栏支持6种飞机类别：喜爱/合约、机队、其他玩家、活动飞机、客机、货机，可多选轮换。
 8. 自动化守护（高级设置 → 设备与方案）：离开游戏自动暂停、航线管理界面自动暂停（检测到玩家接手时暂停，回主界面自动恢复）、游戏错误弹窗频繁时自动重启游戏（默认关闭，需手动开启）。
@@ -4658,14 +4659,11 @@ class Application(ttkb.Window):
         try:
             units = int(self.var_auto_delay_units.get())
         except ValueError:
-            units = 0
-        units = max(0, units)
+            units = 3
+        units = min(max(1, units), 12)
         self.var_auto_delay_units.set(str(units))
         self.sync_all_configs_to_bot()
-        if units == 0:
-            print(">>> [配置] 延时档位: 跟随游戏滑条记忆")
-        else:
-            print(f">>> [配置] 延时档位: 每次延长 {units * 10} 分钟")
+        print(f">>> [配置] 塔台续延间隔: 每 {units * 10} 分钟延长 {units * 10} 分钟")
 
     def on_confirm_anti_stuck(self):
         try:
@@ -4692,8 +4690,8 @@ class Application(ttkb.Window):
         try:
             delay_units = int(self.var_auto_delay_units.get())
         except ValueError:
-            delay_units = int(self.config.get("auto_delay_units", 0))
-        delay_units = max(0, delay_units)
+            delay_units = int(self.config.get("auto_delay_units", 3))
+        delay_units = min(max(1, delay_units), 12)
         self.var_auto_delay_units.set(str(delay_units))
         self.config["auto_delay_units"] = delay_units
         try:
