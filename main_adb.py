@@ -3041,6 +3041,41 @@ class WoaBot:
 
     # ========== 塔台延时：全部激活策略 ==========
 
+    # 「全部激活」面板底部动作按钮所在的带（逻辑坐标 x, y, w, h）
+    TOWER_ACTION_BAND = (400, 760, 700, 100)
+    TOWER_ACTION_MIN_AREA = 800
+
+    def _find_tower_action_button(self, screen):
+        """定位「全部激活」面板底部的黄色动作按钮，返回逻辑坐标 (x, y)；找不到返回 None。
+
+        按钮文字随塔台状态变化（未激活时是「激活」，已激活时是「延长」），位置还会随档位
+        左右移动（10 分钟档右侧多一个「观看广告」按钮会把动作按钮挤到左边），
+        所以按黄色实心连通块来找，而不是模板或固定坐标。
+        """
+        if screen is None:
+            return None
+        x0, y0, w, h = self.TOWER_ACTION_BAND
+        zone = screen[y0:y0 + h, x0:x0 + w]
+        if zone.size == 0 or zone.ndim != 3:
+            return None
+        b = zone[:, :, 0].astype(int)
+        g = zone[:, :, 1].astype(int)
+        r = zone[:, :, 2].astype(int)
+        mask = (((r > 170) & (g > 120) & (b < 120) & ((g - b) > 60))).astype(np.uint8)
+        num, _, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+        best_area, best_box = 0, None
+        for i in range(1, num):
+            area = int(stats[i, cv2.CC_STAT_AREA])
+            bw, bh = int(stats[i, cv2.CC_STAT_WIDTH]), int(stats[i, cv2.CC_STAT_HEIGHT])
+            if area <= best_area or area < self.TOWER_ACTION_MIN_AREA or bh < 20:
+                continue
+            best_area = area
+            best_box = (int(stats[i, cv2.CC_STAT_LEFT]), int(stats[i, cv2.CC_STAT_TOP]), bw, bh)
+        if best_box is None:
+            return None
+        bx, by, bw, bh = best_box
+        return x0 + bx + bw // 2, y0 + by + bh // 2
+
     def _find_slider_knob(self):
         """在持续时间滑条 ROI 内找绿色滑钮，返回逻辑坐标 (x, y)；找不到返回 (None, None)。"""
         import numpy as np
@@ -3121,6 +3156,11 @@ class WoaBot:
                 pos = self._locate_on_screen(btn, screen, confidence=0.75)
                 if pos:
                     break
+            if not pos:
+                # 塔台未激活时面板上没有「延长」按钮，只有一个黄色「激活」按钮
+                pos = self._find_tower_action_button(screen)
+                if pos:
+                    self.log("   🗼 未找到「延长」按钮，改点黄色动作按钮（塔台应为未激活）")
             if pos:
                 if target_minutes:
                     self._set_delay_slider(target_minutes)
@@ -3184,7 +3224,9 @@ class WoaBot:
     def _check_delay_by_ocr(self, pre_times):
         """OCR 对比延时前后时间：若任意活跃控制器时间变长则判定成功。"""
         self.sleep(0.6)
-        post_times = self._read_tower_times(open_menu=False)
+        post_times = self._read_tower_times(open_menu=False, fast=True,
+                                            budget_start=time.time(),
+                                            budget_sec=self.TOWER_INIT_READ_MAX_SEC)
         for i in range(4):
             if not self._tower_active_slots[i]:
                 continue
@@ -3211,7 +3253,10 @@ class WoaBot:
                 return
 
         target = self._delay_interval_minutes()
-        pre_times = self._read_tower_times(open_menu=False)
+        # 基线读取带硬预算：塔台未激活时菜单里没有数字，逐个候选区空跑会卡住主循环约 30 秒
+        pre_times = self._read_tower_times(open_menu=False, fast=True,
+                                           budget_start=time.time(),
+                                           budget_sec=self.TOWER_INIT_READ_MAX_SEC)
         self.log(f"🗼 [塔台] 延时前时间: {pre_times}，本次延长 {target} 分钟")
 
         ok = self._do_delay_all(target)
