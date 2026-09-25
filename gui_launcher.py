@@ -1563,12 +1563,11 @@ class Application(ttkb.Window):
                 return f"{m}分{s:02d}秒"
             return f"{s}秒"
 
-        # 塔台状态（含延时倒计时）
+        # 塔台状态：游戏侧真值——几个控制器开着 + 塔台自己还剩多少时间
+        # （「下次续延」那行显示的是脚本计划，两者不再重复同一个数）
         if bot and getattr(bot, "running", False):
             active = getattr(bot, "_tower_active_slots", [False]*4)
             active_n = sum(active)
-            td = getattr(bot, "_tower_delay_deadline", 0)
-            cd_str = _fmt_cd(td) if td > 0 and delay_on else None
             if active_n == 0:
                 base = "关闭"
             elif active_n == 4:
@@ -1576,22 +1575,16 @@ class Application(ttkb.Window):
             else:
                 slots = ",".join(str(i+1) for i, a in enumerate(active) if a)
                 base = f"开启 {slots}"
-            if cd_str:
-                self.var_tower_status.set(f"{base} · {cd_str}后延时")
-            else:
-                self.var_tower_status.set(base)
+            left = None
+            if active_n:
+                try:
+                    left = bot.tower_remaining_sec()
+                except Exception:
+                    left = None
+            cd_str = _fmt_cd(now + left) if left else None
+            self.var_tower_status.set(f"{base} · 剩 {cd_str}" if cd_str else base)
         else:
             self.var_tower_status.set("—")
-            """格式化倒计时，带颜色标记：>60s 正常，<60s 警告，<30s 紧急"""
-            if deadline is None or deadline <= 0:
-                return "—"
-            remain = max(0, int(deadline - now))
-            if remain <= 0:
-                return "即将触发"
-            m, s = divmod(remain, 60)
-            if m > 0:
-                return f"{m}分{s:02d}秒"
-            return f"{s}秒"
 
         # 下次小退（取两者中最近的一个）
         if bot and getattr(bot, "running", False):
@@ -1609,7 +1602,7 @@ class Application(ttkb.Window):
         else:
             self.var_next_logout_cd.set("—")
 
-        # 塔台延时倒计时
+        # 下次续延倒计时（脚本计划，与上面塔台自己的剩余是两回事）
         if bot and getattr(bot, "running", False):
             td = getattr(bot, "_tower_delay_deadline", 0)
             if td > 0 and getattr(bot, "enable_auto_delay", False):
@@ -2643,7 +2636,7 @@ class Application(ttkb.Window):
         countdown_section_bg = c["elevated"] if self._theme_is_dark else c["surface"]
         cd_data = [
             ("🔄 下次小退", self.var_next_logout_cd, c["warning"]),
-            ("🗼 塔台延时", self.var_tower_delay_cd, c["info"]),
+            ("🗼 下次续延", self.var_tower_delay_cd, c["info"]),
         ]
         for i, (icon, var, accent) in enumerate(cd_data):
             row = sep_row + 1 + i

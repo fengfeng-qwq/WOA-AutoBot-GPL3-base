@@ -1653,6 +1653,16 @@ class WoaBot:
         return max(float(self.DELAY_SKIP_RETRY_SEC),
                    int(remaining_sec) - self.DELAY_TRIGGER_FLOOR_SEC)
 
+    def tower_remaining_sec(self):
+        """塔台自己的剩余时间（秒）：最近一次实测值扣掉已流逝的时间。
+
+        和「下一次进场倒计时」是两回事，界面上两行各显示一个。
+        从没读到过数字（塔台关闭或尚未初始化）时返回 None。"""
+        if self._tower_last_remaining is None:
+            return None
+        return max(0, int(self._tower_last_remaining
+                          - (time.time() - self._tower_last_remaining_ts)))
+
     def set_auto_delay_units(self, units):
         """续延间隔档位（1 格 = 10 分钟）：每这么多分钟进塔台延长这么多分钟。"""
         try:
