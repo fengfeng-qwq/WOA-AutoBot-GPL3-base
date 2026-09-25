@@ -1563,6 +1563,18 @@ class Application(ttkb.Window):
                 return f"{m}分{s:02d}秒"
             return f"{s}秒"
 
+        def _fmt_secs(remain):
+            # 值标签列宽很窄，超一分钟用 mm:ss；超过 100 分钟只到分钟，
+            # 否则「2时10分」这种写法会把尾巴挤出面板
+            if remain is None or remain <= 0:
+                return None
+            m, s = divmod(int(remain), 60)
+            if m >= 100:
+                return f"{m}分"
+            if m > 0:
+                return f"{m}:{s:02d}"
+            return f"{s}秒"
+
         # 塔台状态：游戏侧真值——几个控制器开着 + 塔台自己还剩多少时间
         # （「下次续延」那行显示的是脚本计划，两者不再重复同一个数）
         if bot and getattr(bot, "running", False):
@@ -1581,7 +1593,7 @@ class Application(ttkb.Window):
                     left = bot.tower_remaining_sec()
                 except Exception:
                     left = None
-            cd_str = _fmt_cd(now + left) if left else None
+            cd_str = _fmt_secs(left)
             self.var_tower_status.set(f"{base} · 剩 {cd_str}" if cd_str else base)
         else:
             self.var_tower_status.set("—")
