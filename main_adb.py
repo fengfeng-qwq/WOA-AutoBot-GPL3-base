@@ -2605,6 +2605,9 @@ class WoaBot:
         times = [None, None, None, None]
         raw_by_slot = [set() for _ in range(4)]
         passes = 1 if fast else 2
+        # 这一步会独占主循环十几秒且中间没有输出，不报一声容易被当成卡死
+        ocr_start = time.time()
+        self.log("🗼 [塔台] 正在 OCR 识别 4 个控制器的倒计时，约需 5-15 秒，请稍候…")
         for _ in range(passes):
             if _budget_exhausted(guard=0.2):
                 break
@@ -2644,6 +2647,9 @@ class WoaBot:
                 else:
                     raw_preview = ", ".join(sorted(raw_by_slot[i])) if raw_by_slot[i] else "无"
                     self.log(f"   塔台控制器 {i+1}: 无有效数字 (raw={raw_preview})")
+        spent = time.time() - ocr_start
+        self.log("🗼 [塔台] 倒计时 OCR 完成，读到 %d/4，用时 %.1fs"
+                 % (sum(1 for t in times if t is not None), spent))
         return times
 
     def _handle_server_error_popup(self, force=False):
