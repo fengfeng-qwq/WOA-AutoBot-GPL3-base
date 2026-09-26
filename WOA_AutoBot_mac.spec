@@ -63,7 +63,6 @@ a = Analysis(
         'lxml', 'lxml.etree',
         # 网络请求与通知
         'requests', 'urllib3',
-        'pystray',
         # SSL
         'certifi', 'ssl',
         # 项目内部模块
@@ -71,8 +70,9 @@ a = Analysis(
         'main_adb', 'nemu_ipc', 'platform_utils',
         'woa_debug', 'emulator_discovery',
         'core', 'core.constants', 'core.platform',
-        'core.resources', 'core.debug',
-        'bot', 'bot.config', 'bot.tower', 'bot.filter',
+        'core.resources', 'core.debug', 'core.md_view',
+        'markdown', 'markdown.extensions.tables', 'markdown.extensions.fenced_code',
+        'bot', 'bot.config', 'bot.tower',
     ],
     hookspath=[],
     hooksconfig={},

@@ -63,6 +63,7 @@ from core import (
     SIDEBAR_CATEGORIES,
     DEFAULT_FONT, MONO_FONT, MUMU_PORTS,
 )
+from core.md_view import MD_AVAILABLE, render_markdown
 
 try:
     import orjson
@@ -104,6 +105,35 @@ _MUMU_PORTS = MUMU_PORTS  # 向后兼容别名
 
 # 数据存储路径（开发模式：当前目录；打包后：系统 Application Support）
 _DATA_BASE = get_app_data_dir()
+
+# === 文档窗口滚轮步长 ===========================================
+# Windows 的滚轮本身就是按行步进而非像素平滑，它的规范做法是尊重系统设置
+# 「每次滚动要滚动的行数」(SPI_GETWHEELSCROLLLINES，默认 3)。tk.Text 的 yview
+# 只能按行定位，所以这里按系统行数滚动，并拆成逐帧步进以获得接近 WinUI 的滑动观感。
+_WHEEL_SPI_GET_LINES = 0x0068
+_WHEEL_LINES_DEFAULT = 3
+_WHEEL_FRAME_MS = 16
+
+
+def _wheel_scroll_lines():
+    """返回 (每格滚轮的行数, 是否整页滚动)。读不到系统设置时按 3 行。"""
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            buf = ctypes.c_uint32(0)
+            ok = ctypes.windll.user32.SystemParametersInfoW(
+                _WHEEL_SPI_GET_LINES, 0, ctypes.byref(buf), 0)
+            if ok:
+                value = buf.value
+                if value == 0xFFFFFFFF:      # -1 = 整页
+                    return 0, True
+                if value == 0:               # 0 = 系统里已关闭滚轮滚动
+                    return 0, False
+                return min(int(value), 32), False
+        except Exception:
+            pass
+    return _WHEEL_LINES_DEFAULT, False
+
 
 # === 只读 Text 控件剪贴板补丁 =================================
 # Tk 的 Text 控件在 state="disabled" 时会禁用系统复制粘贴快捷键
@@ -245,25 +275,6 @@ def _announcement_ssl_contexts():
     except Exception:
         pass
 
-
-def _version_tuple(version):
-    parts = []
-    for part in str(version or "").strip().lstrip("vV").split("."):
-        digits = "".join(ch for ch in part if ch.isdigit())
-        parts.append(int(digits or 0))
-    while len(parts) < 4:
-        parts.append(0)
-    return tuple(parts[:4])
-
-
-def _compare_version(left, right):
-    lt = _version_tuple(left)
-    rt = _version_tuple(right)
-    if lt > rt:
-        return 1
-    if lt < rt:
-        return -1
-    return 0
 
 def _write_crash_report(exc_type, exc_value, exc_traceback):
     """写入崩溃报告文件，返回文件路径。任何阶段出错都不抛异常。"""
@@ -741,7 +752,14 @@ class Application(ttkb.Window):
         self.var_speed_mode = tk.BooleanVar(value=self.config.get("speed_mode", False))
         self.var_skip_staff = tk.BooleanVar(value=self.config.get("skip_staff", False))
         self.var_delay_bribe = tk.BooleanVar(value=self.config.get("delay_bribe", False))
-        self.var_delay_count = tk.StringVar(value=str(self.config.get("auto_delay_count", 0)))
+        # 老配置里的 auto_delay_count（次数配额）>0 视为开启开关
+        try:
+            _legacy_delay_uses = int(self.config.get("auto_delay_count", 0) or 0)
+        except (TypeError, ValueError):
+            _legacy_delay_uses = 0
+        self.var_enable_auto_delay = tk.BooleanVar(
+            value=bool(self.config.get("auto_delay_enabled", _legacy_delay_uses > 0)))
+        self.var_auto_delay_units = tk.StringVar(value=str(self.config.get("auto_delay_units", 3) or 3))
         self.var_random_task = tk.BooleanVar(value=self.config.get("random_task_order", True))
         self.var_no_takeoff_mode = tk.BooleanVar(value=self.config.get("no_takeoff_mode", False))
         legacy_logout_interval = self.config.get("standalone_logout_interval")
@@ -759,7 +777,11 @@ class Application(ttkb.Window):
         self.var_anti_stuck_threshold = tk.StringVar(value=str(self.config.get("anti_stuck_threshold", 6)))
         self.var_leave_auto_pause = tk.BooleanVar(value=bool(self.config.get("leave_auto_pause", False)))
         self.var_route_pause = tk.BooleanVar(value=bool(self.config.get("route_auto_pause", False)))
+        self.var_skip_unassigned = tk.BooleanVar(value=bool(self.config.get("skip_unassigned", True)))
         self.var_route_back_minutes = tk.StringVar(value=str(self.config.get("route_back_minutes", 5)))
+        self.var_error_restart = tk.BooleanVar(value=bool(self.config.get("error_restart_enabled", False)))
+        self.var_error_restart_threshold = tk.StringVar(value=str(self.config.get("error_restart_threshold", 10)))
+        self.var_error_restart_window = tk.StringVar(value=str(self.config.get("error_restart_window_min", 5)))
         self.var_notify_enabled = tk.BooleanVar(value=bool(self.config.get("mobile_notify_enabled", False)))
         self.var_notify_provider = tk.StringVar(value=str(self.config.get("mobile_notify_provider", "wecom")))
         self.var_notify_webhook = tk.StringVar(value=str(self.config.get("mobile_notify_webhook", "")))
@@ -807,7 +829,7 @@ class Application(ttkb.Window):
         # ── 实时倒计时 ──
         self.var_next_logout_cd = tk.StringVar(value="—")
         self.var_tower_delay_cd = tk.StringVar(value="—")
-        self.var_auto_delay_left = tk.StringVar(value="0")
+        self.var_auto_delay_left = tk.StringVar(value="—")
         self.var_staff_avail = tk.StringVar(value="—")
         self._runtime_start_time = None
         
@@ -1326,7 +1348,81 @@ class Application(ttkb.Window):
                 return {}
         return {}
 
+    def _instance_config_paths(self):
+        """返回 [(实例号, 配置文件路径)]，覆盖全部实例（含尚未落盘的）。"""
+        return [(i, os.path.join(_DATA_BASE, "config.json" if i == 1 else f"config_{i}.json"))
+                for i in range(1, MAX_INSTANCES + 1)]
+
+    def _export_config_bundle(self, path):
+        """把全部实例配置打包成单个 JSON。当前实例取内存值（最新），其余读磁盘。"""
+        instances = {}
+        for idx, p in self._instance_config_paths():
+            data = None
+            if idx == INSTANCE_ID:
+                data = dict(self.config)
+            elif os.path.exists(p):
+                try:
+                    with open(p, "rb" if orjson else "r", encoding=None if orjson else "utf-8") as f:
+                        raw = f.read()
+                    data = orjson.loads(raw) if orjson else json.loads(raw)
+                except Exception:
+                    data = None
+            if isinstance(data, dict) and data:
+                instances[str(idx)] = data
+        if not instances:
+            raise ValueError("没有可导出的配置")
+        bundle = {
+            "_kind": "woa_autobot_config",
+            "_format": 1,
+            "_app_version": LOCAL_VERSION,
+            "_exported_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "_notice": "包含 Webhook 等私密信息，请勿公开分享",
+            "instances": instances,
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(bundle, f, ensure_ascii=False, indent=2)
+        return len(instances)
+
+    def _import_config_bundle(self, path):
+        """导入导出生成的 JSON；覆盖前逐个备份。返回被写入的实例号列表。"""
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("文件格式不正确：根节点不是对象")
+        if data.get("_kind") == "woa_autobot_config" and isinstance(data.get("instances"), dict):
+            incoming = data["instances"]
+        elif all(isinstance(v, dict) for v in data.values()) and data:
+            incoming = data          # 兼容手工整理的 {实例号: 配置} 形式
+        else:
+            incoming = {str(INSTANCE_ID): data}   # 兼容单份 config.json 直接导入
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        written = []
+        for key, cfg in incoming.items():
+            try:
+                idx = int(key)
+            except (TypeError, ValueError):
+                continue
+            if not (1 <= idx <= MAX_INSTANCES) or not isinstance(cfg, dict) or not cfg:
+                continue
+            target = os.path.join(_DATA_BASE, "config.json" if idx == 1 else f"config_{idx}.json")
+            if os.path.exists(target):
+                try:
+                    with open(target, "rb") as src, open(f"{target}.bak-{stamp}", "wb") as dst:
+                        dst.write(src.read())
+                except OSError:
+                    pass
+            with open(target, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+            written.append(idx)
+        if not written:
+            raise ValueError("文件中没有找到可导入的实例配置")
+        # 导入的文件已落盘；本次进程若再用内存里的旧值写一次配置就会把它冲掉
+        self._config_imported = True
+        return sorted(written)
+
     def save_config(self):
+        if getattr(self, "_config_imported", False):
+            return
         self.config["bonus_staff"] = self.var_bonus_staff.get()
         self.config["vehicle_buy"] = self.var_vehicle_buy.get()
         self.config["speed_mode"] = self.var_speed_mode.get()
@@ -1354,10 +1450,11 @@ class Application(ttkb.Window):
         cat_sel = {c["key"]: bool(self.var_category_selection[c["key"]].get()) for c in SIDEBAR_CATEGORIES}
         self.config["category_selection"] = cat_sel
         self.config["initial_device_paths_detected"] = bool(self.config.get("initial_device_paths_detected", False))
+        self.config["auto_delay_enabled"] = bool(self.var_enable_auto_delay.get())
         try:
-            self.config["auto_delay_count"] = int(self.var_delay_count.get())
+            self.config["auto_delay_units"] = min(max(1, int(self.var_auto_delay_units.get())), 12)
         except (ValueError, TypeError):
-            self.config["auto_delay_count"] = 0
+            self.config["auto_delay_units"] = 3
         try:
             anti_stuck_threshold = int(self.var_anti_stuck_threshold.get())
             anti_stuck_threshold = max(3, min(20, anti_stuck_threshold))
@@ -1450,9 +1547,9 @@ class Application(ttkb.Window):
         else:
             self.var_staff_avail.set("—")
 
-        # 剩余延时次数
-        delay_left = getattr(bot, "auto_delay_count", 0) if bot else 0
-        self.var_auto_delay_left.set(str(delay_left))
+        # 塔台自动续延开关
+        delay_on = bool(getattr(bot, "enable_auto_delay", False)) if bot else False
+        self.var_auto_delay_left.set("开" if delay_on else "关")
 
         # ── 倒计时格式化 ──
         def _fmt_cd(deadline):
@@ -1466,12 +1563,23 @@ class Application(ttkb.Window):
                 return f"{m}分{s:02d}秒"
             return f"{s}秒"
 
-        # 塔台状态（含延时倒计时）
+        def _fmt_secs(remain):
+            # 值标签列宽很窄，超一分钟用 mm:ss；超过 100 分钟只到分钟，
+            # 否则「2时10分」这种写法会把尾巴挤出面板
+            if remain is None or remain <= 0:
+                return None
+            m, s = divmod(int(remain), 60)
+            if m >= 100:
+                return f"{m}分"
+            if m > 0:
+                return f"{m}:{s:02d}"
+            return f"{s}秒"
+
+        # 塔台状态：游戏侧真值——几个控制器开着 + 塔台自己还剩多少时间
+        # （「下次续延」那行显示的是脚本计划，两者不再重复同一个数）
         if bot and getattr(bot, "running", False):
             active = getattr(bot, "_tower_active_slots", [False]*4)
             active_n = sum(active)
-            td = getattr(bot, "_tower_delay_deadline", 0)
-            cd_str = _fmt_cd(td) if td > 0 and delay_left > 0 else None
             if active_n == 0:
                 base = "关闭"
             elif active_n == 4:
@@ -1479,22 +1587,16 @@ class Application(ttkb.Window):
             else:
                 slots = ",".join(str(i+1) for i, a in enumerate(active) if a)
                 base = f"开启 {slots}"
-            if cd_str:
-                self.var_tower_status.set(f"{base} · {cd_str}后延时")
-            else:
-                self.var_tower_status.set(base)
+            left = None
+            if active_n:
+                try:
+                    left = bot.tower_remaining_sec()
+                except Exception:
+                    left = None
+            cd_str = _fmt_secs(left)
+            self.var_tower_status.set(f"{base} · 剩 {cd_str}" if cd_str else base)
         else:
             self.var_tower_status.set("—")
-            """格式化倒计时，带颜色标记：>60s 正常，<60s 警告，<30s 紧急"""
-            if deadline is None or deadline <= 0:
-                return "—"
-            remain = max(0, int(deadline - now))
-            if remain <= 0:
-                return "即将触发"
-            m, s = divmod(remain, 60)
-            if m > 0:
-                return f"{m}分{s:02d}秒"
-            return f"{s}秒"
 
         # 下次小退（取两者中最近的一个）
         if bot and getattr(bot, "running", False):
@@ -1512,10 +1614,10 @@ class Application(ttkb.Window):
         else:
             self.var_next_logout_cd.set("—")
 
-        # 塔台延时倒计时
+        # 下次续延倒计时（脚本计划，与上面塔台自己的剩余是两回事）
         if bot and getattr(bot, "running", False):
             td = getattr(bot, "_tower_delay_deadline", 0)
-            if td > 0 and getattr(bot, "auto_delay_count", 0) > 0:
+            if td > 0 and getattr(bot, "enable_auto_delay", False):
                 self.var_tower_delay_cd.set(_fmt_cd(td))
             elif td > 0:
                 self.var_tower_delay_cd.set("监控中")
@@ -1775,10 +1877,6 @@ class Application(ttkb.Window):
             staff = getattr(bot, "last_checked_avail_staff", None)
             if staff is not None and staff >= 0:
                 status_lines.append(f"可用地勤: {staff}")
-            # 延时次数
-            delay_left = getattr(bot, "auto_delay_count", 0)
-            if delay_left > 0:
-                status_lines.append(f"剩余延时: {delay_left} 次")
             # 塔台
             active = getattr(bot, "_tower_active_slots", [False]*4)
             active_n = sum(active)
@@ -1789,10 +1887,10 @@ class Application(ttkb.Window):
             else:
                 tw = f"{active_n}/4"
             td = getattr(bot, "_tower_delay_deadline", 0)
-            if td > 0 and delay_left > 0:
+            if td > 0 and getattr(bot, "enable_auto_delay", False):
                 remain = max(0, int(td - now))
                 m, s = divmod(remain, 60)
-                tw += f" ({m}分{s:02d}秒后延时)"
+                tw += f" ({m}分{s:02d}秒后续延)"
             status_lines.append(f"塔台: {tw}")
             # 下次小退
             logout_times = []
@@ -2019,7 +2117,7 @@ class Application(ttkb.Window):
         pad = 8
         top_row = ttkb.Frame(self.container_mini, padding=4)
         top_row.pack(fill=X, padx=pad, pady=(pad, 0))
-        ttkb.Label(top_row, text=f"✈ WOA Mini {LOCAL_VERSION}",
+        ttkb.Label(top_row, text="✈ WOA Mini",
                    font=(DEFAULT_FONT, 10, "bold"), bootstyle="primary").pack(side=LEFT)
         ttkb.Button(top_row, text="⤢ 还原", bootstyle="outline-warning",
                     command=self.toggle_mode, padding=(6, 1)).pack(side=RIGHT)
@@ -2469,7 +2567,7 @@ class Application(ttkb.Window):
         right_col.grid(row=0, column=2, sticky="nsew")
         self._build_right_tabs(right_col)
 
-        self.after(100, self._do_initial_scan)
+        self.after(300, self._do_initial_scan)
 
     # ─── 子组件构建方法 ───────────────────────────────
 
@@ -2550,7 +2648,7 @@ class Application(ttkb.Window):
         countdown_section_bg = c["elevated"] if self._theme_is_dark else c["surface"]
         cd_data = [
             ("🔄 下次小退", self.var_next_logout_cd, c["warning"]),
-            ("🗼 塔台延时", self.var_tower_delay_cd, c["info"]),
+            ("🗼 下次续延", self.var_tower_delay_cd, c["info"]),
         ]
         for i, (icon, var, accent) in enumerate(cd_data):
             row = sep_row + 1 + i
@@ -2572,7 +2670,7 @@ class Application(ttkb.Window):
         status_bg = c["elevated"] if self._theme_is_dark else c["surface"]
         status_items = [
             ("👥 可用地勤", self.var_staff_avail, c["success"]),
-            ("🔁 剩余延时", self.var_auto_delay_left, c["warning"]),
+            ("🔁 自动续延", self.var_auto_delay_left, c["warning"]),
             ("🗼 塔台状态", self.var_tower_status, c["info"]),
             ("📊 数据来源", self.var_stats_source, c["primary"]),
         ]
@@ -2707,8 +2805,12 @@ class Application(ttkb.Window):
         tab2 = ttkb.Frame(notebook, padding=(10, 8))
         notebook.add(tab2, text=" 挂机 ")
         _section_label(tab2, "塔台自动延时")
-        _entry_row(tab2, "延时控制器：", self.var_delay_count,
-                   "应用", self.on_confirm_tower_delay, "0=关闭延时，最大144次")
+        _toggle(tab2, "🗼 塔台自动续延", self.var_enable_auto_delay,
+                "按下面的间隔自动进塔台续延\n关闭时只监控塔台状态，不点击任何按钮")
+        _entry_row(tab2, "续延间隔：", self.var_auto_delay_units,
+                   "应用", self.on_confirm_delay_units,
+                   "单位=10分钟：每 N 档进塔台延长 N 档时长（默认 3 档=30 分钟）；"
+                   "上限 12 档=120 分钟（游戏滑条物理上限）。剩余时间已够撑到下一轮时自动跳过，不浪费银币")
         _section_label(tab2, "挂机策略", "info")
         _toggle(tab2, "🛩️ 不起飞模式", self.var_no_takeoff_mode,
                 "只处理降落+停机位，不处理起飞\n4号塔台单开时自动在待降落/停机位间轮切")
@@ -2754,12 +2856,47 @@ class Application(ttkb.Window):
         for btn in [self.btn_main_start, self.btn_mini_start]:
             btn.configure(state="disabled")
         self.update_idletasks()
+        overlay = self._show_scan_overlay()
         try:
-            devs = self._scan_devices_with_public_targets(debug=False)
-        except Exception as e:
-            print(f">>> [扫描异常] {e}")
-            devs = []
+            try:
+                devs = self._scan_devices_with_public_targets(debug=False)
+            except Exception as e:
+                print(f">>> [扫描异常] {e}")
+                devs = []
+        finally:
+            if overlay is not None:
+                overlay.destroy()
+            self.update_idletasks()
         self._apply_scan_result(devs)
+
+    def _show_scan_overlay(self):
+        """扫描期间在主窗口居中显示「正在扫描设备」提示条。
+
+        扫描在主线程同步执行（数秒，期间事件循环停摆），先把提示条
+        完整绘制再进入扫描，避免用户面对未画完的窗口。创建失败不影响扫描。"""
+        try:
+            ov = ttkb.Toplevel(self)
+            ov.overrideredirect(True)
+            ov.transient(self)
+            c = self._clr
+            ov.configure(bg=c["surface"])
+            ttkb.Label(ov, text="正在扫描设备，请稍候…",
+                       font=(DEFAULT_FONT, 11, "bold"),
+                       bootstyle="primary", background=c["surface"]).pack(padx=30, pady=16)
+            self.update_idletasks()
+            w, h = 250, 58
+            ov.attributes("-topmost", True)  # 必须在 geometry 之前：之后设置会把位置重置为 (0,0)
+            if self.winfo_width() > 1:  # 主窗口已映射：居中于主窗口
+                x = self.winfo_rootx() + (self.winfo_width() - w) // 2
+                y = self.winfo_rooty() + (self.winfo_height() - h) // 2
+            else:  # 尚未映射：居中于屏幕
+                x = (self.winfo_screenwidth() - w) // 2
+                y = (self.winfo_screenheight() - h) // 2
+            ov.geometry(f"{w}x{h}+{max(0, x)}+{max(0, y)}")
+            ov.update()  # 强制上屏后再进入阻塞扫描
+            return ov
+        except Exception:
+            return None
 
     def _apply_scan_result(self, devs):
         """在主线程更新扫描结果"""
@@ -2809,21 +2946,16 @@ class Application(ttkb.Window):
 
 【声明】
 - 此脚本为开源免费项目，如您是从任何渠道，例如淘宝、闲鱼、拼多多购买的，请立即退款并举报！
-- 获取更新和反馈问题请加入QQ群1067076460。
-- 官方仓库地址：https://github.com/hjtr7mymht-dot/WOA_AutoBot
-- 作者网站：https://hjtr7mymht-dot.github.io/（个人博客与最新动态）
-- 路线查找器：https://github.com/hjtr7mymht-dot/ARPA-FOR-WOA（自动航路规划工具）
-- 如遇任何问题或bug，请在QQ群内或github上进行反馈。
+- 获取更新、反馈问题请前往 GitHub 仓库：https://github.com/fengfeng-qwq/WOA-AutoBot-GPL3-base
+- 如遇任何问题或 bug，请到 GitHub 提交 Issue，附上日志截图更佳。
 - 脚本尚不稳定，如果造成账号内游戏币损失，本人概不负责！使用辅助工具有风险，请自行评估，如造成账号封禁，与作者无关！
 
 【环境配置】
 1. 支持 Windows/macOS 双平台，推荐使用 MuMu 模拟器（Windows）/ Android 模拟器（macOS），建议使用横屏分辨率，脚本会自动适配。
-2. Mumu模拟器默认ADB地址为127.0.0.1:16384（其他模拟器或多开，请到模拟器设置内查看），并且自备加速器，保证网络通畅。
-3. 请优先连接127.0.0.1:16384，127.0.0.1:16416之类的端口，尽量不要连接127.0.0.1:5555，emulator-5554之类的端口。
-4. 使用MuMu模拟器时，请在设备设置中关闭"网络桥接模式"，关闭"后台挂机时保活运行"选项。
-5. - 如模拟器连接遇到问题，请首先尝试手动指定ADB路径。
-    - 如nemu_ipc方案无法启用，请首先尝试手动指定MuMu安装路径（指定到例如D:\\Program Files\\MuMuPlayer即可，不要指定到MuMuPlayer\\nx_main文件夹）。
-   - 如遇到未知问题，请尝试切换模拟器渲染模式为DirectX。
+2. MuMu 模拟器默认 ADB 地址为 127.0.0.1:16384（其他模拟器或多开，请到模拟器设置内查看），并且自备加速器，保证网络通畅。
+3. 请优先连接 127.0.0.1:16384、127.0.0.1:16416 之类的端口，尽量不要连接 127.0.0.1:5555、emulator-5554 之类的端口。
+4. 使用 MuMu 模拟器时，请在设备设置中关闭"网络桥接模式"，关闭"后台挂机时保活运行"选项。
+5. 如模拟器连接遇到问题，请首先尝试手动指定 ADB 路径；如 nemu_ipc 方案无法启用，请尝试手动指定 MuMu 安装路径（指定到例如 D:\\Program Files\\MuMuPlayer 即可，不要指定到 MuMuPlayer\\nx_main 文件夹）；如遇到未知问题，请尝试切换模拟器渲染模式为 DirectX。
 
 【使用须知】
 1. 游戏语言：必须设置为[简体中文]。
@@ -2835,21 +2967,17 @@ class Application(ttkb.Window):
 1. 推荐使用 uiautomator2 + ADB 方案。脚本运行速度主要取决于[截图方案]，运行速度如下：uiautomator2 >> ADB。
 2. 使用高速方案时，由于速度很快，出错会增多，非常不建议关闭"跳过二次校验"和"跳过地勤分配验证"开关。
 3. 脚本运行时必须保持游戏右侧筛选选项中，仅筛选出带有黄色感叹号的待处理飞机。但您无需担心！脚本可以自动检测并调整筛选状态（支持4按钮识图+模板匹配交叉验证）。
-4. 使用"自动延时塔台"功能前，请保证您已开启塔台，并设置好带有[延时]按钮的界面，脚本不会主动调整（支持二次确认窗口）。
-5. 塔台全开时脚本会自动一键全部续费；部分开启时单独续费每个控制器。
-6. 新增 2D/3D 视角自动切换：在策略面板开启后，脚本每15秒检测并自动切换游戏视角。
+4. 塔台自动续延：使用前请确保停留在可打开塔台菜单的主界面。脚本按[续延间隔]定时进入塔台，点击[全部激活]并把持续时间滑条拖到同一档位，完成二次确认；若检测到塔台处于关闭状态会自动将其打开（不起飞模式下不自动全开，避免改变你设定的控制器组合）。
+5. 续延前会先读一次剩余时间：若已够撑到下一轮则跳过本次，避免把银币花在用不上的时长上；费用以银币按实际延长时长结算，请留意银币余额。
+6. 2D/3D 视角自动切换：在策略面板开启后，脚本每15秒检测并自动切换游戏视角。
 7. 右侧类别栏支持6种飞机类别：喜爱/合约、机队、其他玩家、活动飞机、客机、货机，可多选轮换。
+8. 自动化守护（高级设置 → 设备与方案）：离开游戏自动暂停、航线管理界面自动暂停（检测到玩家接手时暂停，回主界面自动恢复）、游戏错误弹窗频繁时自动重启游戏（默认关闭，需手动开启）。
 
 【macOS 注意事项】
-1. macOS 版以 .dmg 格式分发，双击即可安装。
+1. macOS 版以压缩包分发，内含 .app，解压后拖入"应用程序"目录即可使用。
 2. 首次打开如提示"未验证开发者"，请在访达中右键 → 打开 → 仍要打开。
-3. 需要安装 Android Platform Tools 或将项目内 adb_tools/adb 加入 PATH。
+3. 打包版已自带 ADB 工具；源码运行需要自备 Android Platform Tools，或在脚本设置中手动指定 ADB 路径。
 4. nemu_ipc 为 MuMu 模拟器专属（仅 Windows），macOS 上自动回退到 ADB 截图。
-
-【在线验证】
-1. 当前版本已完全支持离线模式，所有功能无需网络即可运行。
-2. 在线验证仅在后台静默执行版本检测，不会阻断任何操作。
-3. 如检测到新版本会弹窗提示，不会自动下载或覆盖。
 
 【已知问题和缺陷】
 1. 脚本本身支持多开，但测试并不充分，多开很可能存在未知问题。若脚本正在运行时，开启（或关闭）第二个脚本或类似软件（如ALAS），会导致脚本运行中断，请注意，尝试停止后再重新运行。
@@ -2899,6 +3027,7 @@ class Application(ttkb.Window):
         text_area.insert("end", "正在加载...\n")
         text_area.configure(state="disabled")
         _enable_copy_for_disabled_text(text_area)
+        self._bind_doc_wheel(text_area)
         self._center_toplevel_on_parent(win)
 
         def _fill():
@@ -2910,6 +3039,96 @@ class Application(ttkb.Window):
             self._hide_help_badge()
         # 内容已在内存中，无需后台线程加载；使用线程安全队列调度到主线程执行
         self._call_main_thread(_fill)
+
+    def _paint_doc(self, text_area, content, show_source):
+        """把 Markdown 文档画进只读文本区；勾选源码或 markdown 依赖缺失时显示原文。"""
+        if not show_source and render_markdown(text_area, content, self._clr,
+                                               ui_font=DEFAULT_FONT,
+                                               mono_font=MONO_FONT, base_size=10):
+            text_area.configure(state="disabled")
+            return
+        text_area.configure(state="normal")
+        text_area.delete("1.0", END)
+        text_area.insert("end", content)
+        text_area.configure(state="disabled")
+
+    def _make_doc_painter(self, text_area, initial_md):
+        """公告 / 使用说明窗口共用的重绘入口。
+
+        在线公告热替换与「显示源码」切换都走这里，避免两处各写一份渲染逻辑。
+        """
+        box = {"md": initial_md}
+
+        def paint(md=None):
+            if md is not None:
+                box["md"] = md
+            var = getattr(text_area, "_md_source_var", None)
+            self._paint_doc(text_area, box["md"], bool(var.get()) if var else False)
+            text_area.see("1.0")
+
+        text_area._md_paint = paint
+        return paint
+
+    def _read_doc_file(self, md_filename):
+        """读取随包 .md 文档，优先 get_resource_path 以兼容 PyInstaller _MEIPASS。"""
+        try:
+            md_path = get_resource_path(md_filename)
+            if md_path and os.path.isfile(md_path):
+                with open(md_path, "r", encoding="utf-8") as f:
+                    return f.read()
+            fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), md_filename)
+            if os.path.isfile(fallback):
+                with open(fallback, "r", encoding="utf-8") as f:
+                    return f.read()
+            return f"⚠️ 未找到文件: {md_filename}\n已搜索: {md_path}"
+        except Exception as e:
+            return f"⚠️ 读取内容失败: {e}"
+
+    def _add_source_toggle(self, header, text_area):
+        """文档窗口右上角的「显示源码」开关。"""
+        var = tk.BooleanVar(value=False)
+        text_area._md_source_var = var
+        ttkb.Checkbutton(header, text="显示源码", variable=var, bootstyle="primary-round-toggle",
+                         command=lambda: text_area._md_paint()).pack(side=RIGHT)
+
+    def _bind_doc_wheel(self, text_area):
+        """文档窗口滚轮：一格滚动系统设定的行数（Windows 默认 3 行），逐帧步进。"""
+        lines_per_notch, page_mode = _wheel_scroll_lines()
+        state = {"pending": 0, "job": None}
+
+        def _step():
+            state["job"] = None
+            if not text_area.winfo_exists() or state["pending"] == 0:
+                return
+            move = 1 if state["pending"] > 0 else -1
+            text_area.yview_scroll(move, "units")
+            state["pending"] -= move
+            if state["pending"]:
+                state["job"] = text_area.after(_WHEEL_FRAME_MS, _step)
+
+        def _push(notches):
+            want = notches * (lines_per_notch or 1)
+            if state["pending"] and (want > 0) != (state["pending"] > 0):
+                state["pending"] = 0      # 反向时立即改向，不来回抵消
+            state["pending"] = max(-96, min(96, state["pending"] + want))
+            if state["job"] is None:
+                _step()
+
+        def _on_wheel(event):
+            if page_mode:
+                text_area.yview_scroll(-1 if event.delta > 0 else 1, "pages")
+                return "break"
+            if not lines_per_notch:
+                return "break"
+            notches = int(event.delta / 120)          # Windows: 一格 ±120
+            if not notches:                           # macOS 触控板给的是小整数
+                notches = 1 if event.delta > 0 else -1
+            _push(-notches)   # Tk 的 Text 默认绑定是「正 delta 向上」，这里保持同向
+            return "break"
+
+        text_area.bind("<MouseWheel>", _on_wheel)
+        text_area.bind("<Button-4>", lambda _e: (_push(-1), "break")[1])   # 滚轮上
+        text_area.bind("<Button-5>", lambda _e: (_push(1), "break")[1])    # 滚轮下
 
     def _open_online_announcement_window(self):
         """公告窗口：从项目根目录读取 ANNOUNCEMENT.md 并展示。"""
@@ -2941,24 +3160,12 @@ class Application(ttkb.Window):
         scroll.pack(side=RIGHT, fill=Y)
         text_area.config(yscrollcommand=scroll.set)
 
-        # 先读取本地 ANNOUNCEMENT.md 立即展示，随后后台尝试 GitHub 在线公告
-        try:
-            md_path = get_resource_path("ANNOUNCEMENT.md")
-            if md_path and os.path.isfile(md_path):
-                with open(md_path, "r", encoding="utf-8") as f:
-                    text_area.insert("end", f.read())
-            else:
-                fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ANNOUNCEMENT.md")
-                if os.path.isfile(fallback):
-                    with open(fallback, "r", encoding="utf-8") as f:
-                        text_area.insert("end", f.read())
-                else:
-                    text_area.insert("end", "⚠️ 无法加载公告内容。")
-        except Exception as e:
-            text_area.insert("end", f"⚠️ 加载公告失败: {e}")
-
-        text_area.configure(state="disabled")
+        # 先展示本地 ANNOUNCEMENT.md，随后后台尝试 GitHub 在线公告
+        self._make_doc_painter(text_area, self._read_doc_file("ANNOUNCEMENT.md"))()
+        if MD_AVAILABLE:
+            self._add_source_toggle(header, text_area)
         _enable_copy_for_disabled_text(text_area)
+        self._bind_doc_wheel(text_area)
 
         status_label.configure(text="正在获取 GitHub 在线公告…（当前显示本地内容）")
         self._fetch_announcement_online(status_label, text_area)
@@ -2970,11 +3177,7 @@ class Application(ttkb.Window):
         try:
             if not text_area.winfo_exists():
                 return
-            text_area.configure(state="normal")
-            text_area.delete("1.0", END)
-            text_area.insert("end", content)
-            text_area.configure(state="disabled")
-            text_area.see("1.0")
+            text_area._md_paint(content)
             if status_label.winfo_exists():
                 status_label.configure(text=source_note)
         except Exception:
@@ -3039,7 +3242,8 @@ class Application(ttkb.Window):
         header.pack(fill=X)
         ttkb.Label(header, text=f"{icon} {title}", font=(DEFAULT_FONT, 16, "bold"),
                    foreground=c["primary"]).pack(anchor="w")
-        ttkb.Label(header, text=f"支持 Markdown 格式 · 版本 {LOCAL_VERSION}",
+        ttkb.Label(header, text=(f"Markdown 渲染视图 · 版本 {LOCAL_VERSION}" if MD_AVAILABLE
+                                 else f"版本 {LOCAL_VERSION}"),
                    font=(DEFAULT_FONT, 9),
                    foreground=c["text_sec"]).pack(anchor="w", pady=(2, 0))
 
@@ -3055,27 +3259,11 @@ class Application(ttkb.Window):
         scroll.pack(side=RIGHT, fill=Y)
         text_area.config(yscrollcommand=scroll.set)
 
-        # ── 读取 .md 文件（使用 get_resource_path 兼容 PyInstaller _MEIPASS）──
-        content = "⚠️ 无法加载内容，请确认程序文件完整。"
-        try:
-            md_path = get_resource_path(md_filename)
-            if md_path and os.path.isfile(md_path):
-                with open(md_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-            else:
-                # 回退：尝试当前目录
-                fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), md_filename)
-                if os.path.isfile(fallback):
-                    with open(fallback, "r", encoding="utf-8") as f:
-                        content = f.read()
-                else:
-                    content = f"⚠️ 未找到文件: {md_filename}\n已搜索: {md_path}\n和: {fallback}"
-        except Exception as e:
-            content = f"⚠️ 读取内容失败: {e}"
-
-        text_area.insert("end", content)
-        text_area.configure(state="disabled")
+        self._make_doc_painter(text_area, self._read_doc_file(md_filename))()
+        if MD_AVAILABLE:
+            self._add_source_toggle(header, text_area)
         _enable_copy_for_disabled_text(text_area)
+        self._bind_doc_wheel(text_area)
         self._center_toplevel_on_parent(win)
         # 将窗口置顶
         win.lift()
@@ -3792,6 +3980,25 @@ class Application(ttkb.Window):
         e_route_back.pack(side=LEFT, padx=5)
         ttkb.Label(f_route_back, text="分钟，0=不启用（范围 0-120）", bootstyle="secondary").pack(side=LEFT)
 
+        f_error_restart = ttkb.Frame(tab_device_right)
+        f_error_restart.pack(fill=X, pady=5)
+        ttkb.Checkbutton(f_error_restart, text="错误频繁自动重启游戏", variable=self.var_error_restart,
+                         command=lambda: self._toggle_functional_switch("错误频繁自动重启游戏", self.var_error_restart),
+                         bootstyle="success-round-toggle").pack(side=LEFT)
+        f_error_params = ttkb.Frame(tab_device_right)
+        f_error_params.pack(fill=X, pady=(0, 5), padx=(24, 0))
+        ttkb.Label(f_error_params, text="阈值:").pack(side=LEFT)
+        e_error_threshold = ttkb.Entry(f_error_params, textvariable=self.var_error_restart_threshold, width=4)
+        e_error_threshold.pack(side=LEFT, padx=5)
+        ttkb.Label(f_error_params, text="次 /").pack(side=LEFT)
+        e_error_window = ttkb.Entry(f_error_params, textvariable=self.var_error_restart_window, width=4)
+        e_error_window.pack(side=LEFT, padx=5)
+        ttkb.Label(f_error_params, text="分钟（次数 2-30，分钟 1-60，默认关）", bootstyle="secondary").pack(side=LEFT)
+        self.create_info_icon(
+            f_error_restart,
+            "游戏内错误弹窗（好的按钮）在设定时间内达到设定次数时，自动重启游戏并重新进场（约1-2分钟）",
+        ).pack(side=LEFT, padx=5)
+
         ttkb.Separator(tab_runtime_left).pack(fill=X, pady=2)
         ttkb.Label(tab_runtime_left, text="速度优化（风险选项）", font=("bold")).pack(anchor="w")
         f_speed_row = ttkb.Frame(tab_runtime_left)
@@ -3950,6 +4157,16 @@ class Application(ttkb.Window):
                               "开启后，脚本将在列表前3个任务中随机选择（80%概率），或从下方任务中随机选择（20%概率），以模拟真实操作。").pack(
             side=LEFT, padx=5)
 
+        f_skip_unassigned = ttkb.Frame(tab_runtime_right)
+        f_skip_unassigned.pack(fill=X, pady=5)
+        ttkb.Checkbutton(f_skip_unassigned, text="跳过未分配航班", variable=self.var_skip_unassigned,
+                         command=lambda: self._toggle_functional_switch("跳过未分配航班", self.var_skip_unassigned),
+                         bootstyle="success-round-toggle").pack(side=LEFT)
+        self.create_info_icon(f_skip_unassigned,
+                              "识别右侧列表中未分配航线的飞机（目的地栏为红色 -- 、国旗位为未分配徽标），\n"
+                              "这类飞机需要你手动指派，脚本不再点击其卡片，避免空跑和误判为卡死。\n"
+                              "默认开启。若发现该做的任务被跳过，可关闭此项并反馈。").pack(side=LEFT, padx=5)
+
         f_s = ttkb.Frame(tab_runtime_right)
         f_s.pack(fill=X, pady=5)
         ttkb.Label(f_s, text="地勤分配—拖动随机耗时(ms):").pack(side=LEFT)
@@ -4049,11 +4266,23 @@ class Application(ttkb.Window):
             self.config["anti_stuck_enabled"] = self.var_anti_stuck_enabled.get()
             self.config["leave_auto_pause"] = bool(self.var_leave_auto_pause.get())
             self.config["route_auto_pause"] = bool(self.var_route_pause.get())
+            self.config["skip_unassigned"] = bool(self.var_skip_unassigned.get())
             try:
                 route_back_minutes = int(self.var_route_back_minutes.get())
             except (TypeError, ValueError):
                 route_back_minutes = 5
             self.config["route_back_minutes"] = max(0, min(120, route_back_minutes))
+            self.config["error_restart_enabled"] = bool(self.var_error_restart.get())
+            try:
+                error_threshold = int(self.var_error_restart_threshold.get())
+            except (TypeError, ValueError):
+                error_threshold = 10
+            self.config["error_restart_threshold"] = max(2, min(30, error_threshold))
+            try:
+                error_window = int(self.var_error_restart_window.get())
+            except (TypeError, ValueError):
+                error_window = 5
+            self.config["error_restart_window_min"] = max(1, min(60, error_window))
             notify_provider = "dingtalk" if provider_combo.current() == 1 else "wecom"
             notify_webhook = e_notify_webhook.get().strip()
             notify_keyword = e_notify_keyword.get().strip()
@@ -4129,8 +4358,18 @@ class Application(ttkb.Window):
                 changed.append(("离开游戏自动暂停", "开" if self.config.get("leave_auto_pause") else "关"))
             if old_cfg.get("route_auto_pause") != self.config.get("route_auto_pause"):
                 changed.append(("航线管理界面自动暂停", "开" if self.config.get("route_auto_pause") else "关"))
+            if old_cfg.get("skip_unassigned") != self.config.get("skip_unassigned"):
+                changed.append(("跳过未分配航班", "开" if self.config.get("skip_unassigned") else "关"))
+            if old_cfg.get("auto_delay_enabled") != self.config.get("auto_delay_enabled"):
+                changed.append(("塔台自动续延", "开" if self.config.get("auto_delay_enabled") else "关"))
             if old_cfg.get("route_back_minutes") != self.config.get("route_back_minutes"):
                 changed.append(("航线页无操作自动返回", f"{self.config.get('route_back_minutes', 5)} 分钟"))
+            if old_cfg.get("error_restart_enabled") != self.config.get("error_restart_enabled"):
+                changed.append(("错误频繁自动重启游戏", "开" if self.config.get("error_restart_enabled") else "关"))
+            if old_cfg.get("error_restart_threshold") != self.config.get("error_restart_threshold"):
+                changed.append(("自动重启阈值", f"{self.config.get('error_restart_threshold', 10)} 次"))
+            if old_cfg.get("error_restart_window_min") != self.config.get("error_restart_window_min"):
+                changed.append(("自动重启时间窗口", f"{self.config.get('error_restart_window_min', 5)} 分钟"))
             if old_cfg.get("anti_stuck_threshold") != self.config.get("anti_stuck_threshold"):
                 changed.append(("防卡死触发阈值", str(self.config.get("anti_stuck_threshold", 6))))
             if old_cfg.get("mobile_notify_enabled") != self.config.get("mobile_notify_enabled"):
@@ -4225,12 +4464,56 @@ class Application(ttkb.Window):
             except Exception:
                 pass
 
+        def do_export_config():
+            try:
+                default_name = f"woa_autobot_config_{time.strftime('%Y%m%d_%H%M')}.json"
+                path = filedialog.asksaveasfilename(
+                    title="导出配置", defaultextension=".json", initialfile=default_name,
+                    filetypes=[("JSON 文件", "*.json")])
+                if not path:
+                    return
+                count = self._export_config_bundle(path)
+                messagebox.showinfo(
+                    "导出完成",
+                    f"已导出 {count} 个实例的配置：\n{path}\n\n"
+                    "⚠️ 该文件包含 Webhook 地址等私密信息，请勿公开分享。",
+                    parent=win)
+                print(f">>> [配置] 已导出 {count} 个实例 → {path}")
+            except Exception as e:
+                messagebox.showerror("导出失败", str(e), parent=win)
+
+        def do_import_config():
+            path = filedialog.askopenfilename(title="导入配置", filetypes=[("JSON 文件", "*.json")])
+            if not path:
+                return
+            if not messagebox.askyesno(
+                    "确认导入",
+                    "导入会覆盖对应的配置文件（覆盖前自动备份为 .bak-时间戳），\n"
+                    "并且需要重启程序后生效。\n\n继续导入吗？",
+                    parent=win):
+                return
+            try:
+                ids = self._import_config_bundle(path)
+            except Exception as e:
+                messagebox.showerror("导入失败", str(e), parent=win)
+                return
+            messagebox.showinfo(
+                "导入完成",
+                f"已写入实例 {', '.join(str(i) for i in ids)} 的配置，原文件已备份。\n\n"
+                "请重启 WOA AutoBot 使新配置生效。",
+                parent=win)
+            print(f">>> [配置] 已导入实例 {ids} ← {path}（请重启生效）")
+
         bottom_action_row = ttkb.Frame(body)
         bottom_action_row.pack(fill=X, pady=(0, 8))
         ttkb.Button(bottom_action_row, text="💾 保存设置", bootstyle="success", width=18, padding=(8, 4),
                     command=save).pack(side=LEFT)
         ttkb.Button(bottom_action_row, text="关闭", bootstyle="secondary-outline", width=10, padding=(8, 4),
                     command=close_settings).pack(side=LEFT, padx=(12, 0))
+        ttkb.Button(bottom_action_row, text="📤 导出配置", bootstyle="info-outline", width=14, padding=(8, 4),
+                    command=do_export_config).pack(side=RIGHT)
+        ttkb.Button(bottom_action_row, text="📥 导入配置", bootstyle="warning-outline", width=14, padding=(8, 4),
+                    command=do_import_config).pack(side=RIGHT, padx=(0, 12))
         win.protocol("WM_DELETE_WINDOW", close_settings)
         win.after(50, lambda: self._center_toplevel_on_parent(win))
 
@@ -4355,7 +4638,7 @@ class Application(ttkb.Window):
             self.var_tower_status.set("—")
             self.var_next_logout_cd.set("—")
             self.var_tower_delay_cd.set("—")
-            self.var_auto_delay_left.set("0")
+            self.var_auto_delay_left.set("—")
             self.var_staff_avail.set("—")
             self.after(1000, self._update_runtime_stats)
             self.var_runtime_status.set("运行中")
@@ -4406,7 +4689,7 @@ class Application(ttkb.Window):
         self.var_tower_status.set("—")
         self.var_next_logout_cd.set("—")
         self.var_tower_delay_cd.set("—")
-        self.var_auto_delay_left.set("0")
+        self.var_auto_delay_left.set("—")
         self.var_staff_avail.set("—")
         if not getattr(self, "_is_closing", False):
             for btn in [self.btn_main_start, self.btn_mini_start]:
@@ -4441,13 +4724,15 @@ class Application(ttkb.Window):
                 btn.configure(text="▶  继 续")
             print(">>> [暂停] 脚本已暂停")
 
-    def on_confirm_tower_delay(self):
+    def on_confirm_delay_units(self):
+        try:
+            units = int(self.var_auto_delay_units.get())
+        except ValueError:
+            units = 3
+        units = min(max(1, units), 12)
+        self.var_auto_delay_units.set(str(units))
         self.sync_all_configs_to_bot()
-        val_str = self.var_delay_count.get()
-        if val_str == "0":
-            print(f">>> [配置] 自动延时塔台: 已关闭")
-        else:
-            print(f">>> [配置] 自动延时塔台: 已更新为 {val_str} 次")
+        print(f">>> [配置] 塔台续延间隔: 每 {units * 10} 分钟延长 {units * 10} 分钟")
 
     def on_confirm_anti_stuck(self):
         try:
@@ -4462,15 +4747,12 @@ class Application(ttkb.Window):
     def sync_all_configs_to_bot(self, from_advanced_save=False):
         no_log = from_advanced_save
         try:
-            cnt = int(self.var_delay_count.get())
-            if cnt < 0:
-                cnt = 0
-            elif cnt > 144:
-                cnt = 144
+            delay_units = int(self.var_auto_delay_units.get())
         except ValueError:
-            cnt = self.config.get("auto_delay_count", 0)
-        self.var_delay_count.set(str(cnt))
-        self.config["auto_delay_count"] = cnt
+            delay_units = int(self.config.get("auto_delay_units", 3))
+        delay_units = min(max(1, delay_units), 12)
+        self.var_auto_delay_units.set(str(delay_units))
+        self.config["auto_delay_units"] = delay_units
         try:
             anti_stuck_threshold = int(self.var_anti_stuck_threshold.get())
             anti_stuck_threshold = max(3, min(20, anti_stuck_threshold))
@@ -4482,6 +4764,7 @@ class Application(ttkb.Window):
         self.config["anti_stuck_threshold"] = anti_stuck_threshold
         self.config["leave_auto_pause"] = bool(self.var_leave_auto_pause.get())
         self.config["route_auto_pause"] = bool(self.var_route_pause.get())
+        self.config["skip_unassigned"] = bool(self.var_skip_unassigned.get())
         try:
             route_back_minutes = int(self.var_route_back_minutes.get())
         except (TypeError, ValueError):
@@ -4489,6 +4772,21 @@ class Application(ttkb.Window):
         route_back_minutes = max(0, min(120, route_back_minutes))
         self.config["route_back_minutes"] = route_back_minutes
         self.var_route_back_minutes.set(str(route_back_minutes))
+        self.config["error_restart_enabled"] = bool(self.var_error_restart.get())
+        try:
+            error_threshold = int(self.var_error_restart_threshold.get())
+        except (TypeError, ValueError):
+            error_threshold = 10
+        error_threshold = max(2, min(30, error_threshold))
+        self.config["error_restart_threshold"] = error_threshold
+        self.var_error_restart_threshold.set(str(error_threshold))
+        try:
+            error_window = int(self.var_error_restart_window.get())
+        except (TypeError, ValueError):
+            error_window = 5
+        error_window = max(1, min(60, error_window))
+        self.config["error_restart_window_min"] = error_window
+        self.var_error_restart_window.set(str(error_window))
         self.save_config()
         if self.bot:
             self.bot.set_bonus_staff_feature(self.var_bonus_staff.get())
@@ -4496,7 +4794,8 @@ class Application(ttkb.Window):
             self.bot.set_speed_mode(self.var_speed_mode.get())
             self.bot.set_skip_staff_verify(self.var_skip_staff.get())
             self.bot.set_delay_bribe(self.var_delay_bribe.get())
-            self.bot.set_auto_delay(cnt)
+            self.bot.set_auto_delay_enabled(self.var_enable_auto_delay.get())
+            self.bot.set_auto_delay_units(delay_units)
             self.bot.set_random_task_mode(self.var_random_task.get(), log_change=not no_log)
             self.bot.set_slide_duration_range(
                 self.config.get("slide_min", 250), self.config.get("slide_max", 500), log_change=not no_log)
@@ -4515,7 +4814,9 @@ class Application(ttkb.Window):
             self.bot.set_anti_stuck_config(self.var_anti_stuck_enabled.get(), anti_stuck_threshold, log_change=not no_log)
             self.bot.set_leave_auto_pause(self.var_leave_auto_pause.get())
             self.bot.set_route_pause(self.var_route_pause.get())
+            self.bot.set_skip_unassigned(self.var_skip_unassigned.get())
             self.bot.set_route_back_minutes(route_back_minutes)
+            self.bot.set_error_restart(self.var_error_restart.get(), error_threshold, error_window)
             self.bot.set_control_method(self.config.get("control_method", "adb"))
             self.bot.set_screenshot_method(self.config.get("screenshot_method", "nemu_ipc"))
             self.bot.set_mumu_path(self.config.get("mumu_path", ""))
@@ -4527,8 +4828,11 @@ class Application(ttkb.Window):
 
     def on_bot_config_update(self, key, value):
         def _apply_update():
-            if key == "auto_delay_count":
-                self.var_delay_count.set(str(value))
+            if key == "auto_delay_enabled":
+                # bot 侧连续失败自动关开关 → 同步 UI 与配置
+                self.var_enable_auto_delay.set(bool(value))
+                self.config["auto_delay_enabled"] = bool(value)
+                self.save_config()
             elif key == "vehicle_buy":
                 self.var_vehicle_buy.set(bool(value))
             elif key == "paused":
