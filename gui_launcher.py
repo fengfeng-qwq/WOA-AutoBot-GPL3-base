@@ -892,7 +892,7 @@ class Application(ttkb.Window):
         # 环境检测异步执行，避免阻塞主线程导致启动卡顿
         _env_force = (not self._config_file_exists) or (not self.config.get("initial_device_paths_detected", False))
         self.after_idle(lambda: self._bg_worker.submit(
-            lambda: self._prepare_first_run_environment(force=_env_force, reason="首次启动"),
+            lambda: self._env_probe_job(force=_env_force, reason="首次启动"),
             callback=self._on_env_ready,
         ))
 
@@ -1427,6 +1427,7 @@ class Application(ttkb.Window):
     def save_config(self):
         if getattr(self, "_config_imported", False):
             return
+        self._refresh_notify_snapshot()
         self.config["bonus_staff"] = self.var_bonus_staff.get()
         self.config["vehicle_buy"] = self.var_vehicle_buy.get()
         self.config["speed_mode"] = self.var_speed_mode.get()
@@ -1702,15 +1703,32 @@ class Application(ttkb.Window):
             },
         }
 
+    def _refresh_notify_snapshot(self):
+        """把通知相关配置抄成普通 dict（只能在主线程调用）。
+
+        _send_mobile_notify 会被 bot 工作线程经 log 回调链调用，在那里读
+        tk.StringVar / combo_devices 属于跨线程访问 Tcl 解释器，会偶发 SIGSEGV
+        （见 _call_main_thread 的注释），所以工作线程只允许读这份快照。"""
+        try:
+            self._notify_snapshot = {
+                "enabled": bool(self.var_notify_enabled.get()),
+                "provider": str(self.var_notify_provider.get() or "wecom").strip().lower(),
+                "webhook": str(self.var_notify_webhook.get() or "").strip(),
+                "keyword": str(self.var_notify_keyword.get() or "").strip(),
+                "device": str(self.combo_devices.get() or "").strip(),
+            }
+        except Exception:
+            pass
+
     def _send_mobile_notify(self, title, detail, force=False):
-        enabled = bool(self.var_notify_enabled.get())
-        if not enabled and not force:
+        snap = getattr(self, "_notify_snapshot", None) or {}
+        if not snap.get("enabled") and not force:
             return
 
-        provider = str(self.var_notify_provider.get() or "wecom").strip().lower()
+        provider = snap.get("provider") or "wecom"
         if provider not in ("wecom", "dingtalk"):
             provider = "wecom"
-        webhook = str(self.var_notify_webhook.get() or "").strip()
+        webhook = snap.get("webhook") or ""
         if not webhook:
             return
 
@@ -1726,15 +1744,9 @@ class Application(ttkb.Window):
             self._notify_last_ts = now
             self._notify_last_signature = signature
 
-        keyword = str(self.var_notify_keyword.get() or "").strip()
+        keyword = snap.get("keyword") or ""
         provider_name = "企业微信" if provider == "wecom" else "钉钉"
-        device = ""
-        try:
-            device = (self.combo_devices.get() or "").strip()
-        except Exception:
-            device = ""
-        if not device:
-            device = "未选择"
+        device = snap.get("device") or "未选择"
 
         content = (
             f"[WOA AutoBot] {title}\n"
@@ -1997,19 +2009,31 @@ class Application(ttkb.Window):
                     return candidate
         return ""
 
-    def _prepare_first_run_environment(self, force=False, reason="启动"):
-        sdk_result, messages = self._ensure_local_android_sdk()
-        changed = self._maybe_detect_initial_emulator_paths(force=force, reason=reason)
-
+    def _env_message(self, messages, sdk_result):
         detected_mumu = self.config.get("mumu_path", "")
-        detected_adb = self.config.get("adb_path", "") or sdk_result.get("adb_path", "")
+        detected_adb = self.config.get("adb_path", "") or (sdk_result or {}).get("adb_path", "")
         if detected_mumu:
             messages.append("已自动识别 MuMu 路径")
         if detected_adb:
             messages.append("已切换 MuMu ADB" if "MuMu" in detected_adb or "Netease" in detected_adb else "已切换内置 ADB")
+        return " / ".join(dict.fromkeys([m for m in messages if m])) or "环境初始化完成"
 
-        final_message = " / ".join(dict.fromkeys([m for m in messages if m])) or "环境初始化完成"
-        return {"changed": changed, "message": final_message}
+    def _prepare_first_run_environment(self, force=False, reason="启动"):
+        """主线程版本：探测 + 应用 + 汇总提示。"""
+        sdk_result, messages = self._ensure_local_android_sdk()
+        changed = self._apply_detected_emulator_paths(
+            self._detect_initial_emulator_paths(force=force), force=force, reason=reason)
+        return {"changed": changed, "message": self._env_message(messages, sdk_result)}
+
+    def _env_probe_job(self, force=False, reason="启动"):
+        """后台线程只做探测，绝不改 self.config。
+
+        主线程的 save_config 正在对同一个 dict 做 dict(self.config) 快照，两边同时
+        写会互相覆盖，所以探测结果打包返回、回主线程再应用。"""
+        sdk_result, messages = self._ensure_local_android_sdk()
+        return {"sdk_result": sdk_result, "sdk_messages": messages,
+                "detection": self._detect_initial_emulator_paths(force=force),
+                "force": force, "reason": reason}
 
     def _on_env_ready(self, result):
         if isinstance(result, Exception):
@@ -2017,44 +2041,57 @@ class Application(ttkb.Window):
             return
         if not isinstance(result, dict):
             return
-        self._set_system_status(result.get("message", "环境初始化完成"))
-        if result.get("changed"):
+        changed = self._apply_detected_emulator_paths(
+            result.get("detection"), force=result.get("force", False),
+            reason=result.get("reason", "启动"))
+        self._set_system_status(
+            self._env_message(list(result.get("sdk_messages") or []), result.get("sdk_result")))
+        if changed:
             self.var_runtime_status.set("环境已就绪")
             self.save_config()
 
-    def _maybe_detect_initial_emulator_paths(self, force=False, reason="启动"):
+    def _detect_initial_emulator_paths(self, force=False):
+        """只读探测：返回要写进 config 的增删，不改任何共享状态（可在后台线程调用）。"""
         if not force and self.config.get("initial_device_paths_detected", False):
-            return False
-
+            return None
         detected_mumu = self._detect_preferred_mumu_path()
         detected_adb = self._detect_preferred_adb_path(detected_mumu)
-
-        changed = False
+        updates, removals = {}, []
         if force or detected_mumu:
             normalized_mumu = self._normalize_mumu_root(detected_mumu) if detected_mumu else ""
             if normalized_mumu:
                 if self.config.get("mumu_path") != normalized_mumu:
-                    self.config["mumu_path"] = normalized_mumu
-                    changed = True
-            else:
-                if "mumu_path" in self.config:
-                    self.config.pop("mumu_path", None)
-                    changed = True
-
+                    updates["mumu_path"] = normalized_mumu
+            elif "mumu_path" in self.config:
+                removals.append("mumu_path")
         if force or detected_adb:
             if detected_adb:
-                detected_adb = os.path.normpath(detected_adb)
-                if self.config.get("adb_path") != detected_adb:
-                    self.config["adb_path"] = detected_adb
-                    changed = True
-                set_custom_adb_path(detected_adb)
-            else:
-                if "adb_path" in self.config:
-                    self.config.pop("adb_path", None)
-                    changed = True
-                set_custom_adb_path(None)
+                adb = os.path.normpath(detected_adb)
+                if self.config.get("adb_path") != adb:
+                    updates["adb_path"] = adb
+            elif "adb_path" in self.config:
+                removals.append("adb_path")
+        return {"updates": updates, "removals": removals,
+                "adb_path": (os.path.normpath(detected_adb) if detected_adb else None),
+                "set_adb": bool(force or detected_adb)}
 
-        self.config["initial_device_paths_detected"] = True
+    def _apply_detected_emulator_paths(self, detection, force=False, reason="启动"):
+        """把探测结果落到 config 与全局 adb 路径上，只能在主线程调用。"""
+        if detection is None:
+            return False
+        changed = False
+        for key in detection.get("removals") or []:
+            self.config.pop(key, None)
+            changed = True
+        for key, val in (detection.get("updates") or {}).items():
+            if self.config.get(key) != val:      # 值已一致就不算改动，重复应用幂等
+                self.config[key] = val
+                changed = True
+        if detection.get("set_adb"):
+            set_custom_adb_path(detection.get("adb_path"))
+        if not self.config.get("initial_device_paths_detected", False):
+            self.config["initial_device_paths_detected"] = True
+            changed = True
         if changed or force:
             print(
                 f">>> [初始化] {reason}自动检测完成: MuMu={self.config.get('mumu_path', '未发现')} | ADB={self.config.get('adb_path', '默认')}"
@@ -2912,6 +2949,7 @@ class Application(ttkb.Window):
             self.combo_devices['values'] = devs
             if devs:
                 self.combo_devices.current(0)
+                self._refresh_notify_snapshot()
                 self.var_device_status.set(f"已连接候选 {len(devs)} 台")
                 print(f">>> 扫描完成: 发现 {len(devs)} 台设备")
             else:
@@ -4569,6 +4607,7 @@ class Application(ttkb.Window):
             self.combo_devices['values'] = devs
             if devs:
                 self.combo_devices.current(0)
+                self._refresh_notify_snapshot()
                 self.var_device_status.set(f"已连接候选 {len(devs)} 台")
                 print(f">>> 扫描完成: 发现 {len(devs)} 台设备")
             else:
@@ -4605,6 +4644,7 @@ class Application(ttkb.Window):
 
         self.var_runtime_status.set("准备启动")
         self.save_config()
+        self._refresh_notify_snapshot()   # 设备已选定，通知里要带上正确的设备名
 
         try:
             self._connect_public_adb_targets(debug=False)
