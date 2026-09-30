@@ -530,6 +530,10 @@ class WoaBot:
         self._stat_session_stand_count = 0
         self._stat_session_stand_staff = 0
         self._stat_date = None
+        # 线程出口收尾用：统计只落盘一次、自动停止只通知一次
+        self._stats_flushed = False
+        self._stop_requested = False
+        self._stop_notified = False
         self._stat_last_required_cost = None
         self.REGION_STATUS_TITLE = (20, 320, 190, 250)
         self.LIST_ROI_X = 1312
@@ -1893,6 +1897,7 @@ class WoaBot:
         if self.config_callback:
             try:
                 self.config_callback("bot_stopped", "防卡死多次触发且自修复失败，已自动停止")
+                self._stop_notified = True
             except Exception:
                 pass
 
@@ -2082,6 +2087,7 @@ class WoaBot:
 
     def stop(self):
         self.running = False
+        self._stop_requested = True
         self.paused = False  # 停止时清除暂停状态
         self._leave_pause_active = False
         self._route_pause_active = False
@@ -2220,7 +2226,13 @@ class WoaBot:
             self.log(f"⚠️ 保存统计数据失败: {e}")
 
     def _save_stats_to_csv(self):
-        """停止时将当日累计写入 CSV（本次运行 0 点后的部分）"""
+        """停止时将当日累计写入 CSV（本次运行 0 点后的部分）。
+
+        CSV 是按日期累加写入的，所以一次运行只能落一次：手动停止走 stop()、
+        崩溃或异常退出走 _finish_run()，靠这个 flag 去重。"""
+        if self._stats_flushed:
+            return
+        self._stats_flushed = True
         a, d, sc, ss = self._stat_approach, self._stat_depart, self._stat_stand_count, self._stat_stand_staff
         today = time.strftime("%Y-%m-%d")
         self._add_stats_to_csv_date(today, a, d, sc, ss)
@@ -2233,15 +2245,44 @@ class WoaBot:
             pass
 
     def _main_loop(self):
+        crash = None
         try:
             self._do_main_loop()
         except StopSignal:
             pass
         except (KeyboardInterrupt, SystemExit):
             raise
-        except BaseException:
+        except BaseException as exc:
+            crash = exc
             self._write_thread_crash_report()
             traceback.print_exc()
+        finally:
+            self._finish_run(crash)
+
+    def _finish_run(self, crash=None):
+        """工作线程的唯一出口：置停止标志、落当天统计、通知 GUI。
+
+        以前崩溃时这三件事都没做，界面会一直停在「运行中」并拒绝再次启动，
+        跑了几小时的统计也随进程一起丢掉。
+        """
+        self.running = False
+        try:
+            self._save_stats_to_csv()
+        except Exception:
+            traceback.print_exc()
+        if crash is not None:
+            try:
+                self.log(f"🛑 [异常] 主循环已退出: {crash}")
+            except Exception:
+                pass
+        # 手动停止、或别处已经通知过（防卡死自动停机），都不再重复通知 GUI
+        if self._stop_requested or self._stop_notified or not self.config_callback:
+            return
+        try:
+            self.config_callback("bot_stopped",
+                                 f"主循环异常退出：{crash}" if crash else "主循环已结束")
+        except Exception:
+            pass
 
     def _write_thread_crash_report(self):
         """从工作线程安全地写入崩溃报告（不碰 tkinter）"""
@@ -2261,6 +2302,9 @@ class WoaBot:
     def _do_main_loop(self):
         self._run_start_time = time.time()
         self._stat_date = time.strftime("%Y-%m-%d")
+        self._stats_flushed = False
+        self._stop_requested = False
+        self._stop_notified = False
         self.log("[DEBUG] 主循环线程已启动")
         self.sleep(0.3)
         self.last_periodic_check_time = 0.0

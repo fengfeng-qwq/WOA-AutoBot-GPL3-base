@@ -1063,11 +1063,15 @@ class Application(ttkb.Window):
 
         bot = self.bot
         if bot:
-            bot.running = False
-            bot.paused = False  # 解除暂停避免线程阻塞
+            # 原来这里只置 running=False 而不调 stop()：当天统计不写 CSV，
+            # 挂机七八小时直接关窗就全丢了；stop() 内部会落盘并按 flag 去重
+            try:
+                bot.stop()
+            except Exception:
+                bot.running = False
             worker = getattr(bot, '_worker_thread', None)
             if worker and worker.is_alive():
-                worker.join(timeout=2.0)
+                worker.join(timeout=3.0)
             try:
                 adb_ref = getattr(bot, 'adb', None)
                 if adb_ref:
@@ -4871,6 +4875,7 @@ class Application(ttkb.Window):
         """自适应日志刷新 + 后台回调处理。"""
         self._process_main_thread_callbacks()
         self._process_bg_callbacks()
+        self._watch_bot_thread()
         qsize = self.redirector._queue.qsize()
         self.redirector._flush_queue()
 
@@ -4882,6 +4887,23 @@ class Application(ttkb.Window):
             interval = 50
         self.queue_check_interval = interval
         self.after(interval, self.process_log_queue)
+
+    def _watch_bot_thread(self):
+        """看门狗：工作线程不在了但 bot 对象还挂着「运行中」时，把界面收回停止态。
+
+        线程出口自己会通知（main_adb._finish_run），但被 SIGKILL、解释器退出
+        之类的死法发不出任何回调，没有这一条界面会永远卡在「运行中」且拒绝重启。
+        """
+        bot = getattr(self, "bot", None)
+        if bot is None or not getattr(bot, "running", False):
+            return
+        worker = getattr(bot, "_worker_thread", None)
+        if worker is None or worker.is_alive():
+            return
+        print(">>> [看门狗] 脚本工作线程已不存活，界面回到未运行状态")
+        bot.running = False
+        bot._stop_notified = True      # 别再让线程出口重复通知一次
+        self.on_bot_config_update("bot_stopped", "工作线程已退出（看门狗）")
 
 
 if __name__ == "__main__":
