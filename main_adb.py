@@ -714,11 +714,14 @@ class WoaBot:
         self.enable_2d_mode = enabled
         self.log(f">>> [配置] 2D界面模式: {'已开启' if enabled else '已关闭（3D模式）'}")
 
-    def _ensure_view_mode(self):
-        """确保游戏视角为期望的2D/3D模式。使用模板匹配检测当前按钮状态并切换。"""
-        screen = self.adb.get_screenshot() if self.adb else None
+    def _ensure_view_mode(self, screen=None):
+        """确保游戏视角为期望的2D/3D模式。使用模板匹配检测当前按钮状态并切换。
+
+        返回是否真的点了切换：调用方据此判断手里那帧还能不能用。"""
         if screen is None:
-            return
+            screen = self.adb.get_screenshot() if self.adb else None
+        if screen is None:
+            return False
         # 用 on/off 模板检测 2D 按钮状态
         import cv2, os
         def _match_btn(tpl_name, x, y, margin=28):
@@ -747,11 +750,14 @@ class WoaBot:
         if self.enable_2d_mode and not is_2d:
             self.log("🖥️ [视角] 当前为3D模式，切换至2D...")
             self._click_filter_point(vx, vy)
-        elif not self.enable_2d_mode and is_2d:
+            return True
+        if not self.enable_2d_mode and is_2d:
             self.log("🖥️ [视角] 当前为2D模式，切换至3D...")
             # 点击3D按钮
             v3x, v3y = self.VIEW_3D_BTN
             self._click_filter_point(v3x, v3y)
+            return True
+        return False
 
     def _color_diff(self, a, b):
         return sum(abs(int(a[i]) - int(b[i])) for i in range(3))
@@ -836,9 +842,12 @@ class WoaBot:
             return 'landing_stand_cycle'
         return 'stand_only'
 
-    def _is_tower_icon_visible(self):
-        """检测塔台图标是否可见（ROI 内匹配 tower.png）"""
-        return self.safe_locate('tower.png', confidence=0.8, region=self.TOWER_ICON_ROI) is not None
+    def _is_tower_icon_visible(self, screen=None):
+        """检测塔台图标是否可见（ROI 内匹配 tower.png）。给帧就不另截。"""
+        if screen is None:
+            return self.safe_locate('tower.png', confidence=0.8, region=self.TOWER_ICON_ROI) is not None
+        return self._locate_on_screen('tower.png', screen, confidence=0.8,
+                                      region=self.TOWER_ICON_ROI) is not None
 
     def _is_point_red(self, b, g, r):
         """检测点是否为红色（需延时）：R 主导，与绿/灰区分"""
@@ -968,10 +977,15 @@ class WoaBot:
                 return False
         return True
 
-    def _ensure_filter_menu_open(self):
-        """确保筛选菜单已展开（菜单按钮深色=已展开），返回截图"""
+    def _ensure_filter_menu_open(self, screen=None):
+        """确保筛选菜单已展开（菜单按钮深色=已展开），返回截图。
+
+        第一轮优先用调用方给的那帧，省掉一次截图。"""
+        frame = screen
         for _ in range(6):
-            screen = self.adb.get_screenshot()
+            if frame is None:
+                frame = self.adb.get_screenshot()
+            screen = frame
             if screen is None:
                 return None
             mx, my = self.FILTER_MENU_BTN
@@ -979,6 +993,7 @@ class WoaBot:
                 return screen
             self._click_filter_point(mx, my)
             self.sleep(0.18)
+            frame = None          # 点过之后画面变了，下一轮必须重截
         return self.adb.get_screenshot()
 
     def _apply_filter_state(self, expected_state, max_rounds=8):
@@ -1309,23 +1324,35 @@ class WoaBot:
         label = SIDEBAR_CATEGORIES[next_index]["label"]
         return next_index, label
 
-    def _periodic_15s_check(self, force_initial_filter_check=False):
+    def _main_anchor_on(self, screen=None):
+        """主界面锚点是否可见。给了帧就在这帧上判，不另截图。"""
+        if screen is None:
+            return self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR,
+                                    confidence=0.8)
+        return self._locate_on_screen('main_interface.png', screen, confidence=0.8,
+                                      region=self.REGION_MAIN_ANCHOR)
+
+    def _periodic_15s_check(self, force_initial_filter_check=False, screen=None):
+        """每 ~8s 一次的兜底检查。screen 传调用方刚截的那帧：这一段原本最多要
+        自己再截 13 张，而 scan_and_process 每圈本来就截了一帧新的。"""
         now = time.time()
         if not force_initial_filter_check and now - self.last_periodic_check_time < 8.0:
             return
         self.last_periodic_check_time = now
 
         # 1. 检测主界面
-        if self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.8):
+        if self._main_anchor_on(screen):
             self.last_seen_main_interface_time = time.time()
 
-        # 1.5 2D/3D 视角切换检测
-        self._ensure_view_mode()
+        # 1.5 2D/3D 视角切换检测（点过切换就不能再用旧帧）
+        frame = None if self._ensure_view_mode(screen) else screen
 
         # 2. 中间领奖区防卡死：快速扫描（最多5次）
         rx, ry, rw, rh = self.REGION_REWARD_RECOVERY
         for _ in range(5):
-            screen = self.adb.get_screenshot()
+            if frame is None:
+                frame = self.adb.get_screenshot()
+            screen = frame
             if screen is None:
                 break
             roi = screen[ry:ry + rh, rx:rx + rw]
@@ -1340,11 +1367,12 @@ class WoaBot:
                     break
             if not clicked:
                 break
+            frame = None          # 点过恢复按钮，画面已经变了
 
         # 3. 筛选状态检查 - 识图版
-        if not self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.8):
+        if not self._main_anchor_on(frame):
             return
-        screen = self._ensure_filter_menu_open()
+        screen = self._ensure_filter_menu_open(frame)
         if screen is None:
             return
 
@@ -3608,12 +3636,12 @@ class WoaBot:
             return False
         if time.time() < self.doing_task_forbidden_until:
             return False
-        if not self._is_tower_icon_visible():
-            return False
 
         if screen is None:
             screen = self.adb.get_screenshot()
         if screen is None:
+            return False
+        if not self._is_tower_icon_visible(screen):
             return False
 
         is_triggered = False
@@ -4595,14 +4623,14 @@ class WoaBot:
 
         if state != self.STATE_MAIN:
             # 过渡态或未知态 → 周期性检查 + 尝试关窗
-            self._periodic_15s_check()
+            self._periodic_15s_check(screen=screen)
             if self._check_and_perform_auto_delay(screen):
                 return True
             return False
 
         # ── 阶段 1：主界面常规维护 ──
         self._check_and_recover_interface(current_screen=screen)
-        self._periodic_15s_check()
+        self._periodic_15s_check(screen=screen)
         self._cleanup_task_cooldown()
 
         # ── 阶段 2：红灯最高优先级 ──
