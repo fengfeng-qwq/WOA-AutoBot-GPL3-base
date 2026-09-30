@@ -217,6 +217,9 @@ class AdbController:
 
     def __init__(self, target_device=None, use_minitouch=False, screenshot_method="adb", control_method=None, instance_id=1):
         self.instance_id = instance_id
+        # 模板缓存按实例隔离：以前是类属性（同进程共享），多开时一个实例
+        # close() 会把其它实例正在用的模板一起清空，它们只能全部重新读盘
+        self._template_cache = {}
         self._minitouch_base_port = 17392 + (instance_id - 1)
         self._droidcast_base_port = 53516 + (instance_id - 1)
         self.device_serial = target_device
@@ -1828,8 +1831,10 @@ class AdbController:
     def _read_image_safe(self, path):
         return read_image_safe(path)
 
-    _template_cache = {}
-    _template_cache_max = 60  # 上限防止多开时内存无限制增长
+    _template_cache = {}      # 仅作兜底声明，实际用 __init__ 里的实例字典
+    _template_cache_max = 200
+    # 上限要盖得住 icon/ 下的全部模板（含 digits/ 共 123 张）：以前是 60，
+    # 热模板会被 FIFO 挤出去，下一轮又要读盘解码。单张几十 KB，200 张约 2MB
 
     def _cache_template(self, template_path, template):
         """将模板放入缓存，当缓存超限时清理最旧的条目"""

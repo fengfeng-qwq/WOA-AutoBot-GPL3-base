@@ -2921,7 +2921,7 @@ class WoaBot:
         if tpl is None:
             tpl = self.adb._read_image_safe(tpl_path)
             if tpl is not None:
-                self.adb._template_cache[tpl_path] = tpl
+                self.adb._cache_template(tpl_path, tpl)
         if tpl is None or roi.size == 0:
             return False
         result = cv2.matchTemplate(roi, tpl, cv2.TM_CCOEFF_NORMED)
