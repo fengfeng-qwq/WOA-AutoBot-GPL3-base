@@ -1405,6 +1405,11 @@ class WoaBot:
                                                          region=self.REGION_MAIN_ANCHOR):
             self.log("🏗️ [机位升级] 不在主界面，2 分钟后重试")
             return False
+        need = getattr(self, '_stand_min_unaffordable', None)
+        coins = self._read_green_coins(screen)
+        if need and coins is not None and coins < need:
+            self.log(f"🏗️ [机位升级] 绿币 {coins} < 上次最便宜未买起的 {need}，本轮跳过")
+            return True
         # 机位图钉识别只在 2D 视角下可靠（3D 下图钉大小随透视变化），先强制切 2D
         want_2d = self.enable_2d_mode
         self.enable_2d_mode = True
@@ -1450,6 +1455,7 @@ class WoaBot:
         # 被左下面板盖住的图钉放在最前面，趁面板还没打开先处理
         pins.sort(key=lambda p: (not self._in_rect(p, panel_rect), p[0], p[1]))
         bought = skipped = 0
+        min_short = None   # 本轮看到的最便宜但买不起的价格
         for idx, pin in enumerate(pins):
             self._check_running()
             if idx > 0 and self._in_rect(pin, panel_rect):
@@ -1483,13 +1489,20 @@ class WoaBot:
                 if cur is None:
                     break
                 if self._color_close(cur[self.STAND_BUY_PT[1], self.STAND_BUY_PT[0]], self.STAND_BUY_BRIGHT):
+                    ok, price, coins = self._affordable(cur, 'stand')
+                    if ok is False:
+                        min_short = price if min_short is None else min(min_short, price)
+                        continue   # 买不起这一级，退一级再看
                     bx, by = self.STAND_BUY_PT
                     self.adb.swipe(bx, by, bx, by, duration_ms=1500)
                     self.sleep(1.5)
                     bought += 1
                     self.log(f"🏗️ [机位升级] 已购买机位等级 → {'ABCDEFG'[li]}")
                     break
+        self._stand_min_unaffordable = min_short if (bought == 0 and min_short) else None
         msg = f"🏗️ [机位升级] 本轮完成：购买 {bought} 次"
+        if min_short:
+            msg += f"，有机位因绿币不足未升级（最便宜 {min_short}）"
         if skipped:
             msg += f"，{skipped} 个被面板遮挡的机位留到下一轮"
         self.log(msg)
@@ -4081,6 +4094,92 @@ class WoaBot:
         still_confirm = self._locate_on_screen('buy_vehicle_confirm.png', verify_screen, confidence=0.78)
         return not (still_buy or still_confirm or self._in_vehicle_garage(verify_screen))
 
+    # ─── 绿币余额 / 价格识别 ─────────────────────────────
+    # 顶栏绿币与面板价格同一字体：白字、深色底。按列切出单个数字，再与
+    # icon/digits/coin/0-9.png（由实际截图平均得到的 12x18 字形）做相关比对。
+    _COIN_GW, _COIN_GH = 12, 18
+
+    def _coin_digit_refs(self):
+        refs = getattr(self, '_coin_refs_cache', None)
+        if refs is None:
+            refs = {}
+            for d in '0123456789':
+                img = cv2.imread(os.path.join(self.icon_path, 'digits', 'coin', f'{d}.png'), cv2.IMREAD_GRAYSCALE)
+                if img is not None:
+                    refs[d] = img.astype(np.float32) / 255.0
+            self._coin_refs_cache = refs
+        return refs
+
+    def _read_coin_digits(self, img, min_score=0.4):
+        refs = self._coin_digit_refs()
+        if img is None or img.size == 0 or len(refs) < 10:
+            return None
+        g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+        b = (g > 170).astype(np.uint8)
+        cols = b.sum(axis=0) > 0
+        text, x = '', 0
+        while x < len(cols):
+            if not cols[x]:
+                x += 1
+                continue
+            s = x
+            while x < len(cols) and cols[x]:
+                x += 1
+            sub = b[:, s:x]
+            rows = np.where(sub.any(axis=1))[0]
+            sub = sub[rows[0]:rows[-1] + 1]
+            if sub.shape[0] < 6:
+                continue
+            h, w = sub.shape
+            nw = max(1, min(self._COIN_GW, int(round(w * self._COIN_GH / h))))
+            glyph = np.zeros((self._COIN_GH, self._COIN_GW), np.float32)
+            x0 = (self._COIN_GW - nw) // 2
+            glyph[:, x0:x0 + nw] = cv2.resize(sub.astype(np.float32), (nw, self._COIN_GH),
+                                              interpolation=cv2.INTER_AREA)
+            a = glyph - glyph.mean()
+            best, best_s = None, -2.0
+            for d, r in refs.items():
+                rb = r - r.mean()
+                den = float(np.sqrt((a * a).sum() * (rb * rb).sum())) or 1.0
+                sc = float((a * rb).sum()) / den
+                if sc > best_s:
+                    best, best_s = d, sc
+            if best_s < min_score:
+                return None
+            text += best
+        return int(text) if text else None
+
+    def _read_green_coins(self, screen):
+        """顶栏绿币余额；读不出返回 None。"""
+        if screen is None:
+            return None
+        g = cv2.cvtColor(screen, cv2.COLOR_BGR2GRAY)
+        x = 940
+        while x < 1100 and abs(int(g[22, x]) - 39) <= 6:   # 余额胶囊底色 = 39
+            x += 1
+        if x <= 950:
+            return None
+        return self._read_coin_digits(screen[23:44, 938:x - 2])
+
+    def _read_panel_price(self, screen):
+        """左下面板（机位 / 车库）「购买」按钮上方的价格；读不出返回 None。"""
+        if screen is None:
+            return None
+        sub = screen[765:792, 120:280].astype(int)
+        m = (sub[:, :, 1] > 150) & (sub[:, :, 1] - sub[:, :, 2] > 40)   # 绿币图标
+        xs = np.where(m.any(axis=0))[0]
+        if not len(xs):
+            return None
+        cr = 120 + int(xs.max())
+        return self._read_coin_digits(screen[766:790, cr + 3:cr + 100])
+
+    def _affordable(self, screen, tag):
+        """价格与余额都读得出时才判断；读不出返回 None（交给按钮亮暗兜底）。"""
+        price, coins = self._read_panel_price(screen), self._read_green_coins(screen)
+        if price is None or coins is None:
+            return None, price, coins
+        return coins >= price, price, coins
+
     # 游戏 3.8 新版车库：左下面板一个大按钮，黄色「购买」→ 点一下变绿色「确认」→ 再点完成购买
     VEHICLE_BUY_PT = (186, 816)
     VEHICLE_BUY_YELLOW = (0, 187, 233)
@@ -4109,6 +4208,12 @@ class WoaBot:
         screen = self.adb.get_screenshot()
         if not self._in_vehicle_garage(screen):
             return None
+        ok, price, coins = self._affordable(screen, 'vehicle')
+        if ok is False:
+            # 记住价格：余额涨到这个数之前不再进车库
+            self._vehicle_unaffordable_price = price
+            self.log(f"   -> 💸 绿币不足（余额 {coins} < 价格 {price}），不购买")
+            return False
         if self._vehicle_btn_state(screen) == 'buy':
             self.adb.click(*self.VEHICLE_BUY_PT, random_offset=6)
             self.sleep(0.8)
@@ -4117,7 +4222,10 @@ class WoaBot:
             return False
         self.adb.click(*self.VEHICLE_BUY_PT, random_offset=6)
         self.sleep(1.2)
-        return self._vehicle_btn_state(self.adb.get_screenshot()) == 'buy'
+        done = self._vehicle_btn_state(self.adb.get_screenshot()) == 'buy'
+        if done:
+            self._vehicle_unaffordable_price = None
+        return done
 
     def handle_vehicle_check_task(self, target_pos=None):
         self.sleep(0.2)
@@ -4130,6 +4238,15 @@ class WoaBot:
         red_warn = batch_hits.get('red_warning')
         if red_warn:
             self._no_operable_count = 0
+            short_price = getattr(self, '_vehicle_unaffordable_price', None)
+            coins_now = self._read_green_coins(screen) if short_price else None
+            if self.enable_vehicle_buy and short_price and coins_now is not None and coins_now < short_price:
+                now = time.time()
+                if now - getattr(self, '_vehicle_short_log_ts', 0) > 300:
+                    self._vehicle_short_log_ts = now
+                    self.log(f"   -> 💸 车辆不足，但绿币 {coins_now} < 上次价格 {short_price}，攒够再买")
+                self.close_window()
+                return False
             if self.enable_vehicle_buy:
                 self.log("   -> 🚨 发现车辆不足，准备购买")
                 self.adb.click(red_warn[0], red_warn[1], random_offset=6)
@@ -4150,7 +4267,8 @@ class WoaBot:
                     self.log("   -> ✅ 购买车辆成功")
                     bought = True
                 elif new_result is False:
-                    self.log("   -> 🛑 购买按钮不可用（绿币不足或该车辆已达上限），本次跳过")
+                    if not getattr(self, '_vehicle_unaffordable_price', None):
+                        self.log("   -> 🛑 购买按钮不可用（绿币不足或该车辆已达上限），本次跳过")
                 elif self.wait_and_click('buy_vehicle.png', timeout=2.0, click_wait=1.0):
                     if self.wait_and_click('buy_vehicle_confirm.png', timeout=3.0, click_wait=0.5):
                         self.log("   -> ✅ 购买确认成功")
