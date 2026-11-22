@@ -4063,7 +4063,7 @@ class WoaBot:
 
             has_buy = self._locate_on_screen('buy_vehicle.png', screen, confidence=0.78)
             has_confirm = self._locate_on_screen('buy_vehicle_confirm.png', screen, confidence=0.78)
-            if not has_buy and not has_confirm:
+            if not has_buy and not has_confirm and not self._in_vehicle_garage(screen):
                 return True
 
             # 依次尝试返回、取消和右上角关闭，尽量兼容不同弹窗层级。
@@ -4079,7 +4079,45 @@ class WoaBot:
             return False
         still_buy = self._locate_on_screen('buy_vehicle.png', verify_screen, confidence=0.78)
         still_confirm = self._locate_on_screen('buy_vehicle_confirm.png', verify_screen, confidence=0.78)
-        return not (still_buy or still_confirm)
+        return not (still_buy or still_confirm or self._in_vehicle_garage(verify_screen))
+
+    # 游戏 3.8 新版车库：左下面板一个大按钮，黄色「购买」→ 点一下变绿色「确认」→ 再点完成购买
+    VEHICLE_BUY_PT = (186, 816)
+    VEHICLE_BUY_YELLOW = (0, 187, 233)
+    VEHICLE_CONFIRM_GREEN = (188, 240, 144)
+
+    def _vehicle_btn_state(self, screen):
+        if screen is None:
+            return None
+        px = screen[self.VEHICLE_BUY_PT[1], self.VEHICLE_BUY_PT[0]]
+        if self._color_close(px, self.VEHICLE_BUY_YELLOW, 30):
+            return 'buy'
+        if self._color_close(px, self.VEHICLE_CONFIRM_GREEN, 30):
+            return 'confirm'
+        return None
+
+    def _in_vehicle_garage(self, screen):
+        """新版车库：左上为返回箭头（无主界面菜单按钮），左下为购买/确认按钮。"""
+        if screen is None or self._vehicle_btn_state(screen) is None:
+            return False
+        if self._locate_on_screen('main_interface.png', screen, confidence=0.8, region=self.REGION_MAIN_ANCHOR):
+            return False
+        return bool(self._locate_on_screen('back.png', screen, confidence=0.8, region=(0, 0, 140, 120)))
+
+    def _buy_vehicle_new_garage(self):
+        """新版车库购买流程，返回 True=已购买 / False=买不了（绿币不足或已达上限）/ None=不在新版车库。"""
+        screen = self.adb.get_screenshot()
+        if not self._in_vehicle_garage(screen):
+            return None
+        if self._vehicle_btn_state(screen) == 'buy':
+            self.adb.click(*self.VEHICLE_BUY_PT, random_offset=6)
+            self.sleep(0.8)
+            screen = self.adb.get_screenshot()
+        if self._vehicle_btn_state(screen) != 'confirm':
+            return False
+        self.adb.click(*self.VEHICLE_BUY_PT, random_offset=6)
+        self.sleep(1.2)
+        return self._vehicle_btn_state(self.adb.get_screenshot()) == 'buy'
 
     def handle_vehicle_check_task(self, target_pos=None):
         self.sleep(0.2)
@@ -4097,7 +4135,23 @@ class WoaBot:
                 self.adb.click(red_warn[0], red_warn[1], random_offset=6)
                 self.sleep(0.5)
                 bought = False
-                if self.wait_and_click('buy_vehicle.png', timeout=2.0, click_wait=1.0):
+                # 先等车库打开，再按新版 / 旧版按钮分别处理
+                new_result = None
+                t_wait = time.time()
+                while time.time() - t_wait < 2.5:
+                    self._check_running()
+                    new_result = self._buy_vehicle_new_garage()
+                    if new_result is not None:
+                        break
+                    if self.safe_locate('buy_vehicle.png', confidence=0.78):
+                        break
+                    self.sleep(0.3)
+                if new_result is True:
+                    self.log("   -> ✅ 购买车辆成功")
+                    bought = True
+                elif new_result is False:
+                    self.log("   -> 🛑 购买按钮不可用（绿币不足或该车辆已达上限），本次跳过")
+                elif self.wait_and_click('buy_vehicle.png', timeout=2.0, click_wait=1.0):
                     if self.wait_and_click('buy_vehicle_confirm.png', timeout=3.0, click_wait=0.5):
                         self.log("   -> ✅ 购买确认成功")
                         bought = True
