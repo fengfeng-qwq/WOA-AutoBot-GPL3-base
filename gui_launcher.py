@@ -1335,20 +1335,25 @@ class Application(ttkb.Window):
         # Step 1: 顶层窗口将原始按键映射为虚拟事件
         # 注意：用 self.bind（顶层），不用 bind_all。
         # 这样控件级 handler 可通过 return "break" 阻止虚拟事件生成。
+        self.bind('<Command-a>', lambda e: self.event_generate('<<SelectAll>>'))
+        self.bind('<Control-a>', lambda e: self.event_generate('<<SelectAll>>'))
+        self.bind_all('<<SelectAll>>', _clipboard_select_all)
+
+        # 复制/粘贴/剪切只在 macOS 兜底：Windows/Linux 上 Tk 的 Entry/Text 自带
+        # Ctrl+C/V/X，再叠加这里的处理会让一次 Ctrl+V 粘贴 2~3 次。
+        if not IS_MAC:
+            return
         self.bind('<Command-c>', lambda e: self.event_generate('<<Copy>>'))
         self.bind('<Control-c>', lambda e: self.event_generate('<<Copy>>'))
         self.bind('<Command-v>', lambda e: self.event_generate('<<Paste>>'))
         self.bind('<Control-v>', lambda e: self.event_generate('<<Paste>>'))
         self.bind('<Command-x>', lambda e: self.event_generate('<<Cut>>'))
         self.bind('<Control-x>', lambda e: self.event_generate('<<Cut>>'))
-        self.bind('<Command-a>', lambda e: self.event_generate('<<SelectAll>>'))
-        self.bind('<Control-a>', lambda e: self.event_generate('<<SelectAll>>'))
 
         # Step 2: bind_all 处理虚拟事件，执行实际剪贴板操作
         self.bind_all('<<Copy>>', _clipboard_copy)
         self.bind_all('<<Paste>>', _clipboard_paste)
         self.bind_all('<<Cut>>', _clipboard_cut)
-        self.bind_all('<<SelectAll>>', _clipboard_select_all)
 
     def load_config(self):
         if os.path.exists(CONFIG_FILE):
