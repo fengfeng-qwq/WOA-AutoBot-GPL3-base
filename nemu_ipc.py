@@ -13,6 +13,29 @@ from woa_debug import _woa_debug_log, save_image_safe
 NEMU_IPC_DEBUG = 0
 
 
+def _dll_rel_candidates(folder):
+    """external_renderer_ipc.dll 的候选相对路径。
+    MuMu 12 旧版在 shell/sdk；新版 MuMu（nx 架构）按安卓版本分目录，
+    例如 nx_device/12.0、nx_device/15.0，另在 nx_main/sdk 也有一份。"""
+    rels = ["shell/sdk/external_renderer_ipc.dll"]
+    try:
+        dev_root = os.path.join(folder, "nx_device")
+        if os.path.isdir(dev_root):
+            def _ver_key(name):
+                try:
+                    return tuple(int(p) for p in name.split("."))
+                except ValueError:
+                    return (0,)
+            for ver in sorted(os.listdir(dev_root), key=_ver_key, reverse=True):
+                rels.append(f"nx_device/{ver}/shell/sdk/external_renderer_ipc.dll")
+    except OSError:
+        pass
+    if "nx_device/12.0/shell/sdk/external_renderer_ipc.dll" not in rels:
+        rels.append("nx_device/12.0/shell/sdk/external_renderer_ipc.dll")
+    rels.append("nx_main/sdk/external_renderer_ipc.dll")
+    return rels
+
+
 class _SafeDLLWrapper:
     """包装 DLL 句柄，手动通过 GetProcAddress 获取函数地址，绕过 Nuitka 的 ctypes 拦截逻辑
     仅在 Windows 上有效。"""
@@ -175,7 +198,7 @@ class NemuIpcHelper:
             folder = os.path.abspath(self._ctrl.mumu_path)
             if "MuMuPlayerGlobal" in folder:
                 return None, None
-            for rel in ("shell/sdk/external_renderer_ipc.dll", "nx_device/12.0/shell/sdk/external_renderer_ipc.dll"):
+            for rel in _dll_rel_candidates(folder):
                 fp = os.path.join(folder, rel)
                 if os.path.isfile(fp):
                     try:
@@ -203,7 +226,7 @@ class NemuIpcHelper:
                 if os.path.isdir(p):
                     cand_folders.append(p)
             for folder in cand_folders:
-                for rel in ("shell/sdk/external_renderer_ipc.dll", "nx_device/12.0/shell/sdk/external_renderer_ipc.dll"):
+                for rel in _dll_rel_candidates(folder):
                     fp = os.path.join(folder, rel)
                     if os.path.isfile(fp):
                         try:
@@ -219,7 +242,7 @@ class NemuIpcHelper:
             if "MuMuPlayerGlobal" in mumu_root:
                 return None, None
             if os.path.isdir(mumu_root):
-                for rel in ("shell/sdk/external_renderer_ipc.dll", "nx_device/12.0/shell/sdk/external_renderer_ipc.dll"):
+                for rel in _dll_rel_candidates(mumu_root):
                     fp = os.path.join(mumu_root, rel)
                     if os.path.isfile(fp):
                         try:
@@ -387,7 +410,7 @@ class NemuIpcHelper:
                     self._logged = "fail"
                     return None
 
-                for rel in ("shell/sdk/external_renderer_ipc.dll", "nx_device/12.0/shell/sdk/external_renderer_ipc.dll"):
+                for rel in _dll_rel_candidates(folder):
                     dll_path = os.path.join(folder, rel)
                     if os.path.isfile(dll_path):
                         self._lib = _load_dll_safe(dll_path)
