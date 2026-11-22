@@ -1177,20 +1177,25 @@ class WoaBot:
         loc = self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.8)
         if not loc:
             self.log("📋 [小退] 未找到主界面按钮，跳过")
-            return
+            return False
         self.adb.click(loc[0], loc[1], random_offset=8)
-        self.sleep(0.6)
-        # 重试查找更改机场按钮（等待界面过渡完成）
+        self.sleep(1.0)
+        # 重试查找换机场按钮（等待界面过渡完成）。
+        # 游戏 3.8 起按钮文字由「更改机场」改为「切换机场」，两种模板都试。
         found_airport = False
-        for _ in range(5):
+        for _ in range(8):
             self._check_running()
-            if self.find_and_click('change_airport.png', confidence=0.75, wait=0):
+            if (self.find_and_click('change_airport_2.png', confidence=0.8, wait=0) or
+                    self.find_and_click('change_airport.png', confidence=0.75, wait=0)):
                 found_airport = True
                 break
-            self.sleep(0.25)
+            self.sleep(0.3)
         if not found_airport:
-            self.log("📋 [小退] 未找到更改机场按钮，跳过")
-            return
+            self.log("📋 [小退] 未找到切换机场按钮，跳过")
+            # 菜单可能已打开：点对话框外侧关闭，避免停在菜单里
+            self.adb.click(*self.MENU_DISMISS_PT, random_offset=10)
+            self.sleep(0.8)
+            return False
         self.sleep(4.0)
         if switch_airport:
             self._select_next_airport()
@@ -1216,9 +1221,12 @@ class WoaBot:
                 except Exception as e:
                     self.log(f"🗼 [塔台] ⚠️ 小退后重检测失败: {e}")
                 self._periodic_15s_check(force_initial_filter_check=True)
-                return
+                return True
             self.sleep(0.6)
         self.log("📋 [小退] 90s 内未检测到主界面，由后续流程处理")
+        return True   # 已进入换机场流程，不重试
+
+    MENU_DISMISS_PT = (160, 720)   # 主菜单对话框外侧，点击可关闭菜单
 
     # 机场选择页右侧卡片（逻辑坐标 1600x900）：第 k 张卡片中心 = (X, Y0 + k*STEP)
     AIRPORT_CARD_X = 1412
@@ -2724,12 +2732,16 @@ class WoaBot:
                         now_ts >= self._airport_rotation_next_time):
                         self._airport_rotation_next_time = now_ts + self._airport_rotation_interval * 60.0
                         self.log("✈️ [轮换机场] 到达轮换间隔，切换到下一个机场")
-                        self._do_no_takeoff_small_logout(switch_airport=True)
-                        # 刚换过机场等于刚小退过，顺延小退计时，避免紧接着又小退
-                        if self.enable_standalone_logout:
-                            self._schedule_standalone_logout()
-                        if self.enable_no_takeoff_mode:
-                            self._schedule_no_takeoff_auto_logout()
+                        if not self._do_no_takeoff_small_logout(switch_airport=True):
+                            # 没进到换机场流程（菜单没打开、正在处理任务窗口等），2 分钟后再试
+                            self._airport_rotation_next_time = now_ts + 120.0
+                            self.log("✈️ [轮换机场] 本次未能切换，2 分钟后重试")
+                        else:
+                            # 刚换过机场等于刚小退过，顺延小退计时，避免紧接着又小退
+                            if self.enable_standalone_logout:
+                                self._schedule_standalone_logout()
+                            if self.enable_no_takeoff_mode:
+                                self._schedule_no_takeoff_auto_logout()
                     # 自动升级机位
                     if (self.enable_stand_upgrade and
                         self._stand_upgrade_next_time > 0 and
