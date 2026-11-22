@@ -1178,6 +1178,9 @@ class WoaBot:
         if not loc:
             self.log("📋 [小退] 未找到主界面按钮，跳过")
             return False
+        if switch_airport:
+            # 记下左上角当前机场的国旗与代码，到选择页里找出对应卡片，以确定「当前」是第几个
+            self._airport_tag = self._crop_airport_tag(self.adb.get_screenshot())
         self.adb.click(loc[0], loc[1], random_offset=8)
         self.sleep(1.0)
         # 重试查找换机场按钮（等待界面过渡完成）。
@@ -1255,14 +1258,63 @@ class WoaBot:
                 return k
         return self.AIRPORT_CARD_MAX   # 可见范围内都没有锁 = 都已拥有
 
+    # 主界面左上角：国旗 / 机场代码（逻辑坐标，y0, y1, x0, x1）
+    AIRPORT_TAG_FLAG = (28, 52, 130, 156)
+    AIRPORT_TAG_TEXT = (26, 54, 156, 196)
+
+    def _crop_airport_tag(self, screen):
+        if screen is None:
+            return None
+        fy0, fy1, fx0, fx1 = self.AIRPORT_TAG_FLAG
+        ty0, ty1, tx0, tx1 = self.AIRPORT_TAG_TEXT
+        return screen[fy0:fy1, fx0:fx1].copy(), screen[ty0:ty1, tx0:tx1].copy()
+
+    def _identify_current_airport_card(self, screen, owned):
+        """在机场选择页里找出与进入前左上角国旗+代码最像的卡片序号；不确定时返回 None。
+        选择页列表顺序可能随当前机场变化，所以不能只靠记住的序号。"""
+        tag = getattr(self, '_airport_tag', None)
+        if tag is None or screen is None:
+            return None
+        scores = []
+        for k in range(owned):
+            cy = self.AIRPORT_CARD_Y0 + k * self.AIRPORT_CARD_STEP
+            roi = screen[max(0, cy - 60):cy, 1290:1440]
+            total = 0.0
+            for part in tag:
+                best = 0.0
+                for sc in (0.9, 0.95, 1.0, 1.05, 1.1):
+                    t = cv2.resize(part, None, fx=sc, fy=sc)
+                    if t.shape[0] > roi.shape[0] or t.shape[1] > roi.shape[1]:
+                        continue
+                    best = max(best, cv2.minMaxLoc(cv2.matchTemplate(roi, t, cv2.TM_CCOEFF_NORMED))[1])
+                total += best
+            scores.append(total)
+        if not scores:
+            return None
+        order = sorted(range(len(scores)), key=lambda i: -scores[i])
+        best = order[0]
+        second = scores[order[1]] if len(order) > 1 else 0.0
+        if scores[best] >= 1.4 and scores[best] - second >= 0.2:
+            return best
+        return None
+
     def _select_next_airport(self):
         """在机场选择页点击下一个机场卡片，之后由调用方点击「开始」进场。
         机场数量每次现场识别，解锁新机场后自动纳入轮换，无需改设置。"""
         self._check_running()
-        owned = self._count_owned_airports(self.adb.get_screenshot())
+        # 等选择页加载完：出现「已锁定」卡片才算加载好（最多再等 10s）
+        owned, screen = None, None
+        t0 = time.time()
+        while time.time() - t0 < 10.0:
+            screen = self.adb.get_screenshot()
+            n = self._count_owned_airports(screen)
+            if n is not None and n < self.AIRPORT_CARD_MAX:
+                owned = n
+                break
+            self.sleep(0.8)
         if owned is None:
             owned = self._airport_rotation_count
-            self.log(f"✈️ [轮换机场] 未能识别机场数量，按设置的 {owned} 个处理")
+            self.log(f"✈️ [轮换机场] 未能识别机场数量，按 {owned} 个处理")
         elif owned != self._airport_rotation_count:
             self.log(f"✈️ [轮换机场] 识别到已拥有 {owned} 个机场")
             self._airport_rotation_count = max(1, owned)
@@ -1272,9 +1324,13 @@ class WoaBot:
             self._airport_rotation_index = 0
             self.sleep(1.5)
             return
-        nxt = (self._airport_rotation_index + 1) % owned
+        cur = self._identify_current_airport_card(screen, owned)
+        if cur is None:
+            cur = self._airport_rotation_index % owned
+            self.log(f"✈️ [轮换机场] 未能确认当前机场，按记录视为第 {cur + 1} 个")
+        nxt = (cur + 1) % owned
         y = self.AIRPORT_CARD_Y0 + nxt * self.AIRPORT_CARD_STEP
-        self.log(f"✈️ [轮换机场] 第 {self._airport_rotation_index + 1} 个 → 第 {nxt + 1} 个机场")
+        self.log(f"✈️ [轮换机场] 当前第 {cur + 1} 个 → 切到第 {nxt + 1} 个机场（共 {owned} 个）")
         self.adb.click(self.AIRPORT_CARD_X, y, random_offset=6)
         self._airport_rotation_index = nxt
         self.sleep(1.5)
@@ -1347,8 +1403,8 @@ class WoaBot:
         screen = self.adb.get_screenshot()
         if screen is None or not self._locate_on_screen('main_interface.png', screen, confidence=0.8,
                                                          region=self.REGION_MAIN_ANCHOR):
-            self.log("🏗️ [机位升级] 不在主界面，本轮跳过")
-            return
+            self.log("🏗️ [机位升级] 不在主界面，2 分钟后重试")
+            return False
         # 机位图钉识别只在 2D 视角下可靠（3D 下图钉大小随透视变化），先强制切 2D
         want_2d = self.enable_2d_mode
         self.enable_2d_mode = True
@@ -1358,11 +1414,19 @@ class WoaBot:
                 screen = self.adb.get_screenshot()
         finally:
             self.enable_2d_mode = want_2d
-        crane = self._locate_on_screen('main_dock_crane.png', screen, confidence=0.8,
-                                       region=self.ROUTE_DOCK_ROI) if screen is not None else None
+        crane = None
+        for attempt in range(3):
+            crane = self._locate_on_screen('main_dock_crane.png', screen, confidence=0.8,
+                                           region=self.ROUTE_DOCK_ROI) if screen is not None else None
+            if crane:
+                break
+            # 底部栏被航班详情等窗口挡住（左上菜单按钮仍可见）：先关窗口再找
+            self.close_window()
+            self.sleep(1.0)
+            screen = self.adb.get_screenshot()
         if not crane:
-            self.log("🏗️ [机位升级] 未找到「建造」按钮，本轮跳过")
-            return
+            self.log("🏗️ [机位升级] 未找到「建造」按钮（可能有窗口未关闭），2 分钟后重试")
+            return False
         self.adb.click(crane[0], crane[1], random_offset=4)
         self.sleep(2.0)
         try:
@@ -1370,6 +1434,7 @@ class WoaBot:
         finally:
             if not want_2d:
                 self._ensure_view_mode()   # 用户原本用 3D，升级完切回去
+        return True
 
     def _do_stand_upgrade_in_build_mode(self):
         self._check_running()
@@ -2747,7 +2812,8 @@ class WoaBot:
                         self._stand_upgrade_next_time > 0 and
                         now_ts >= self._stand_upgrade_next_time):
                         self._stand_upgrade_next_time = now_ts + self._stand_upgrade_interval * 60.0
-                        self._do_stand_upgrade_round()
+                        if self._do_stand_upgrade_round() is False:
+                            self._stand_upgrade_next_time = now_ts + 120.0
                     # 塔台倒计时
                     if self._check_tower_countdown():
                         idle_count = 0
