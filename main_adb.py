@@ -517,6 +517,16 @@ class WoaBot:
         self._no_takeoff_auto_logout_next_time = 0.0
         self._standalone_logout_interval = 30.0
         self._standalone_logout_next_time = 0.0
+        # 自动轮换机场（独立计时，不依赖小退）：机场选择页右侧列表中，已拥有的机场排在最前面
+        self.enable_airport_rotation = False
+        self._airport_rotation_interval = 60.0   # 分钟
+        self._airport_rotation_next_time = 0.0
+        self._airport_rotation_count = 2
+        self._airport_rotation_index = 0   # 当前所在机场在列表中的序号（0 起）
+        # 自动升级机位：定时进「建造」逐个点机位，买到最高可用等级
+        self.enable_stand_upgrade = False
+        self._stand_upgrade_interval = 30.0   # 分钟
+        self._stand_upgrade_next_time = 0.0
         # 不起飞策略稳定性保护
         self._no_takeoff_last_strategy = 'stand_only'
         self._no_takeoff_strategy_stable_count = 0
@@ -693,6 +703,67 @@ class WoaBot:
         self.log(f">>> [配置] 独立小退间隔: {interval:g} 分钟")
         if self.enable_standalone_logout:
             self._schedule_standalone_logout()
+
+    def set_airport_rotation_enabled(self, enabled):
+        enabled = bool(enabled)
+        if self.enable_airport_rotation == enabled:
+            return
+        self.enable_airport_rotation = enabled
+        self.log(f">>> [配置] 自动轮换机场: {'已开启' if enabled else '已关闭'}")
+        self._airport_rotation_next_time = (
+            time.time() + self._airport_rotation_interval * 60.0 if enabled else 0.0)
+
+    def set_airport_rotation_interval(self, minutes):
+        try:
+            interval = float(minutes)
+        except (TypeError, ValueError):
+            interval = 60.0
+        interval = max(5.0, min(1440.0, interval))
+        if self._airport_rotation_interval == interval:
+            return
+        self._airport_rotation_interval = interval
+        self.log(f">>> [配置] 轮换机场间隔: {interval:g} 分钟")
+        if self.enable_airport_rotation:
+            self._airport_rotation_next_time = time.time() + interval * 60.0
+
+    def set_airport_rotation_count(self, count):
+        try:
+            count = int(count)
+        except (TypeError, ValueError):
+            count = 2
+        count = max(2, min(self.AIRPORT_CARD_MAX, count))
+        if self._airport_rotation_count == count:
+            return
+        self._airport_rotation_count = count
+        self._airport_rotation_index %= count
+        self.log(f">>> [配置] 轮换机场数量: {count}")
+
+    def set_stand_upgrade_enabled(self, enabled):
+        enabled = bool(enabled)
+        if self.enable_stand_upgrade == enabled:
+            return
+        self.enable_stand_upgrade = enabled
+        self.log(f">>> [配置] 自动升级机位: {'已开启' if enabled else '已关闭'}")
+        # 开启后约 1 分钟先跑一轮，之后按间隔
+        self._stand_upgrade_next_time = time.time() + 60.0 if enabled else 0.0
+
+    def set_stand_upgrade_interval(self, minutes):
+        try:
+            interval = float(minutes)
+        except (TypeError, ValueError):
+            interval = 30.0
+        interval = max(5.0, min(240.0, interval))
+        if self._stand_upgrade_interval == interval:
+            return
+        self._stand_upgrade_interval = interval
+        self.log(f">>> [配置] 自动升级机位间隔: {interval:g} 分钟")
+
+    def set_airport_rotation_index(self, index):
+        try:
+            index = int(index)
+        except (TypeError, ValueError):
+            index = 0
+        self._airport_rotation_index = index % max(1, self._airport_rotation_count)
 
     def set_cancel_stand_filter_when_tower_off(self, enabled):
         if self.enable_cancel_stand_filter == enabled:
@@ -1098,8 +1169,9 @@ class WoaBot:
         self._no_takeoff_cycle_next_switch_time = time.time() + self._no_takeoff_switch_interval
         self.log(f"📋 [不起飞] {reason}，{old} → {self._no_takeoff_cycle_side}")
 
-    def _do_no_takeoff_small_logout(self):
+    def _do_no_takeoff_small_logout(self, switch_airport=False):
         """不起飞模式小退：换机场 → 重进游戏 → 恢复处理。
+        switch_airport=True 时在机场选择页先选下一个机场（自动轮换机场复用此流程）。
         流程：点击主界面 → 换机场 → 等待 → 点击开始 → 等待主界面 → 重检测塔台/筛选。"""
         self._check_running()
         loc = self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.8)
@@ -1120,6 +1192,8 @@ class WoaBot:
             self.log("📋 [小退] 未找到更改机场按钮，跳过")
             return
         self.sleep(4.0)
+        if switch_airport:
+            self._select_next_airport()
         # 等待 first_start_2 按钮（最多30s）
         t0 = time.time()
         while time.time() - t0 < 30.0:
@@ -1145,6 +1219,217 @@ class WoaBot:
                 return
             self.sleep(0.6)
         self.log("📋 [小退] 90s 内未检测到主界面，由后续流程处理")
+
+    # 机场选择页右侧卡片（逻辑坐标 1600x900）：第 k 张卡片中心 = (X, Y0 + k*STEP)
+    AIRPORT_CARD_X = 1412
+    AIRPORT_CARD_Y0 = 74
+    AIRPORT_CARD_STEP = 121
+    AIRPORT_CARD_MAX = 7   # 不滚动列表时能完整点到的卡片数
+
+    def _count_owned_airports(self, screen):
+        """数机场选择页右侧列表里已拥有的机场：已拥有的排在最前，
+        第一张带「🔒 已锁定」的卡片之前的数量即为拥有数。识别失败返回 None。"""
+        if screen is None:
+            return None
+        tpl_path = self.icon_path + 'airport_locked.png'
+        tpl = self.adb._template_cache.get(tpl_path)
+        if tpl is None:
+            tpl = self.adb._read_image_safe(tpl_path)
+            if tpl is None:
+                return None
+            self.adb._cache_template(tpl_path, tpl)
+        for k in range(self.AIRPORT_CARD_MAX):
+            cy = self.AIRPORT_CARD_Y0 + k * self.AIRPORT_CARD_STEP
+            roi = screen[cy + 10:cy + 60, 1300:1380]
+            if roi.shape[0] < tpl.shape[0] or roi.shape[1] < tpl.shape[1]:
+                break
+            if cv2.minMaxLoc(cv2.matchTemplate(roi, tpl, cv2.TM_CCOEFF_NORMED))[1] >= 0.8:
+                return k
+        return self.AIRPORT_CARD_MAX   # 可见范围内都没有锁 = 都已拥有
+
+    def _select_next_airport(self):
+        """在机场选择页点击下一个机场卡片，之后由调用方点击「开始」进场。
+        机场数量每次现场识别，解锁新机场后自动纳入轮换，无需改设置。"""
+        self._check_running()
+        owned = self._count_owned_airports(self.adb.get_screenshot())
+        if owned is None:
+            owned = self._airport_rotation_count
+            self.log(f"✈️ [轮换机场] 未能识别机场数量，按设置的 {owned} 个处理")
+        elif owned != self._airport_rotation_count:
+            self.log(f"✈️ [轮换机场] 识别到已拥有 {owned} 个机场")
+            self._airport_rotation_count = max(1, owned)
+        if owned < 2:
+            self.log("✈️ [轮换机场] 只有 1 个机场，重进当前机场")
+            self.adb.click(self.AIRPORT_CARD_X, self.AIRPORT_CARD_Y0, random_offset=6)
+            self._airport_rotation_index = 0
+            self.sleep(1.5)
+            return
+        nxt = (self._airport_rotation_index + 1) % owned
+        y = self.AIRPORT_CARD_Y0 + nxt * self.AIRPORT_CARD_STEP
+        self.log(f"✈️ [轮换机场] 第 {self._airport_rotation_index + 1} 个 → 第 {nxt + 1} 个机场")
+        self.adb.click(self.AIRPORT_CARD_X, y, random_offset=6)
+        self._airport_rotation_index = nxt
+        self.sleep(1.5)
+
+    # ─── 自动升级机位 ─────────────────────────────────────
+    # 以下坐标/颜色均为 1600x900 逻辑分辨率下，在「建造」模式机位面板中实测所得
+    STAND_LETTER_XS = (446, 502, 558, 616, 673, 729, 786)   # 机位等级筛选 A..G
+    STAND_LETTER_Y = 819
+    STAND_BUY_PT = (194, 817)          # 「购买」按钮（需长按约 1.5s，无确认弹窗）
+    STAND_PICKER_TOGGLE = (362, 649)   # 面板右侧的等级筛选开关按钮
+    STAND_EXIT_PT = (58, 53)           # 左上角返回
+    STAND_COLORS = {                   # BGR
+        'owned': (153, 220, 96),       # 已拥有（绿）
+        'avail': (203, 191, 179),      # 可购买（白）
+        'sel': (239, 174, 53),         # 当前选中（蓝）
+        'locked': (125, 112, 99),      # 未解锁（灰）
+    }
+    STAND_BUY_BRIGHT = (0, 187, 233)   # 购买可点（亮黄）；暗黄 = 机位已占用 / 绿币不足
+    STAND_TOGGLE_COLOR = (233, 222, 211)
+
+    @staticmethod
+    def _color_close(px, ref, tol=40):
+        return all(abs(int(a) - int(b)) <= tol for a, b in zip(px, ref))
+
+    def _find_stand_pins(self, screen):
+        """在建造模式截图里找机位图钉：图钉本体灰度≈48（深色地块是 52、地面 102），
+        中间带亮色编号标签。返回逻辑坐标列表。"""
+        import numpy as np
+        g = cv2.cvtColor(screen, cv2.COLOR_BGR2GRAY)
+        body = ((g >= 46) & (g <= 50)).astype(np.uint8)
+        body[:75, :] = 0
+        body[:, 1480:] = 0
+        n, _lab, st, cen = cv2.connectedComponentsWithStats(body)
+        cands = []
+        for i in range(1, n):
+            x, y, w, h, a = st[i]
+            if not (6 <= a <= 110 and 3 <= w <= 13 and 3 <= h <= 16):
+                continue
+            win = g[max(0, y - 5):y + h, x:x + w]
+            nb = int((win >= 120).sum())
+            if 2 <= nb <= 30:
+                cands.append((int(round(cen[i][0])), int(round(cen[i][1])) - 2, int(a)))
+        pins = []
+        for p in sorted(cands, key=lambda p: -p[2]):
+            if all(abs(p[0] - q[0]) > 8 or abs(p[1] - q[1]) > 10 for q in pins):
+                pins.append(p)
+        return sorted(((x, y) for x, y, _ in pins), key=lambda p: (p[0], p[1]))
+
+    def _stand_letter_states(self, screen):
+        out = []
+        for x in self.STAND_LETTER_XS:
+            px = screen[self.STAND_LETTER_Y, x - 15]
+            state = None
+            for name, ref in self.STAND_COLORS.items():
+                if self._color_close(px, ref, 30):
+                    state = name
+                    break
+            out.append(state)
+        return out
+
+    @staticmethod
+    def _in_rect(pt, rect):
+        x0, y0, x1, y1 = rect
+        return x0 <= pt[0] <= x1 and y0 <= pt[1] <= y1
+
+    def _do_stand_upgrade_round(self):
+        """进入建造模式，逐个点机位，把每个机位买到能买的最高等级。
+        机位上有飞机、绿币不够时「购买」是暗的，直接跳过。"""
+        self._check_running()
+        screen = self.adb.get_screenshot()
+        if screen is None or not self._locate_on_screen('main_interface.png', screen, confidence=0.8,
+                                                         region=self.REGION_MAIN_ANCHOR):
+            self.log("🏗️ [机位升级] 不在主界面，本轮跳过")
+            return
+        # 机位图钉识别只在 2D 视角下可靠（3D 下图钉大小随透视变化），先强制切 2D
+        want_2d = self.enable_2d_mode
+        self.enable_2d_mode = True
+        try:
+            if self._ensure_view_mode(screen):
+                self.sleep(2.0)
+                screen = self.adb.get_screenshot()
+        finally:
+            self.enable_2d_mode = want_2d
+        crane = self._locate_on_screen('main_dock_crane.png', screen, confidence=0.8,
+                                       region=self.ROUTE_DOCK_ROI) if screen is not None else None
+        if not crane:
+            self.log("🏗️ [机位升级] 未找到「建造」按钮，本轮跳过")
+            return
+        self.adb.click(crane[0], crane[1], random_offset=4)
+        self.sleep(2.0)
+        try:
+            self._do_stand_upgrade_in_build_mode()
+        finally:
+            if not want_2d:
+                self._ensure_view_mode()   # 用户原本用 3D，升级完切回去
+
+    def _do_stand_upgrade_in_build_mode(self):
+        self._check_running()
+        screen = self.adb.get_screenshot()
+        pins = self._find_stand_pins(screen) if screen is not None else []
+        if not pins:
+            self.log("🏗️ [机位升级] 建造模式下没有识别到机位，退出")
+            self._exit_build_mode()
+            return
+        self.log(f"🏗️ [机位升级] 识别到 {len(pins)} 个机位，开始逐个检查")
+        panel_rect = (0, 405, 410, 900)     # 左下机位面板（打开后会盖住此区域的图钉）
+        picker_rect = (400, 690, 835, 900)  # 底部等级筛选面板
+        # 被左下面板盖住的图钉放在最前面，趁面板还没打开先处理
+        pins.sort(key=lambda p: (not self._in_rect(p, panel_rect), p[0], p[1]))
+        bought = skipped = 0
+        for idx, pin in enumerate(pins):
+            self._check_running()
+            if idx > 0 and self._in_rect(pin, panel_rect):
+                skipped += 1
+                continue
+            if self._in_rect(pin, picker_rect):
+                cur = self.adb.get_screenshot()
+                if cur is not None and any(self._stand_letter_states(cur)):
+                    self.adb.click(*self.STAND_PICKER_TOGGLE, random_offset=3)
+                    self.sleep(0.6)
+            self.adb.click(pin[0], pin[1], random_offset=2)
+            self.sleep(1.0)
+            cur = self.adb.get_screenshot()
+            if cur is None or not self._color_close(cur[self.STAND_PICKER_TOGGLE[1], self.STAND_PICKER_TOGGLE[0]],
+                                                     self.STAND_TOGGLE_COLOR):
+                continue  # 没点出机位面板（误识别或被遮挡）
+            states = self._stand_letter_states(cur)
+            if not any(states):
+                self.adb.click(*self.STAND_PICKER_TOGGLE, random_offset=3)
+                self.sleep(0.6)
+                cur = self.adb.get_screenshot()
+                states = self._stand_letter_states(cur) if cur is not None else []
+            avail = [i for i, s in enumerate(states) if s in ('avail', 'sel')]
+            if not avail:
+                continue  # 已经是最高可用等级
+            # 先试最高等级，买不起再往下退一级
+            for li in reversed(avail):
+                self.adb.click(self.STAND_LETTER_XS[li], self.STAND_LETTER_Y, random_offset=3)
+                self.sleep(0.7)
+                cur = self.adb.get_screenshot()
+                if cur is None:
+                    break
+                if self._color_close(cur[self.STAND_BUY_PT[1], self.STAND_BUY_PT[0]], self.STAND_BUY_BRIGHT):
+                    bx, by = self.STAND_BUY_PT
+                    self.adb.swipe(bx, by, bx, by, duration_ms=1500)
+                    self.sleep(1.5)
+                    bought += 1
+                    self.log(f"🏗️ [机位升级] 已购买机位等级 → {'ABCDEFG'[li]}")
+                    break
+        msg = f"🏗️ [机位升级] 本轮完成：购买 {bought} 次"
+        if skipped:
+            msg += f"，{skipped} 个被面板遮挡的机位留到下一轮"
+        self.log(msg)
+        self._exit_build_mode()
+
+    def _exit_build_mode(self):
+        for _ in range(3):
+            self._check_running()
+            self.adb.click(*self.STAND_EXIT_PT, random_offset=3)
+            self.sleep(1.5)
+            if self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.8):
+                return
+        self.log("🏗️ [机位升级] 退出建造模式后未回到主界面，交给防卡死处理")
 
     def _schedule_no_takeoff_auto_logout(self):
         self._no_takeoff_auto_logout_next_time = time.time() + self._no_takeoff_auto_logout_interval * 60.0
@@ -2433,6 +2718,24 @@ class WoaBot:
                         self.log("📋 [小退] 独立小退触发")
                         self._do_no_takeoff_small_logout()
                         self._schedule_standalone_logout()
+                    # 自动轮换机场（独立计时）
+                    if (self.enable_airport_rotation and
+                        self._airport_rotation_next_time > 0 and
+                        now_ts >= self._airport_rotation_next_time):
+                        self._airport_rotation_next_time = now_ts + self._airport_rotation_interval * 60.0
+                        self.log("✈️ [轮换机场] 到达轮换间隔，切换到下一个机场")
+                        self._do_no_takeoff_small_logout(switch_airport=True)
+                        # 刚换过机场等于刚小退过，顺延小退计时，避免紧接着又小退
+                        if self.enable_standalone_logout:
+                            self._schedule_standalone_logout()
+                        if self.enable_no_takeoff_mode:
+                            self._schedule_no_takeoff_auto_logout()
+                    # 自动升级机位
+                    if (self.enable_stand_upgrade and
+                        self._stand_upgrade_next_time > 0 and
+                        now_ts >= self._stand_upgrade_next_time):
+                        self._stand_upgrade_next_time = now_ts + self._stand_upgrade_interval * 60.0
+                        self._do_stand_upgrade_round()
                     # 塔台倒计时
                     if self._check_tower_countdown():
                         idle_count = 0
