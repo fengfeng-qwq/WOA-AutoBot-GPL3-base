@@ -47,6 +47,11 @@ import subprocess
 import time
 import webbrowser
 import urllib.request
+
+# 手机提醒平台：配置值 → 显示名（顺序即下拉框顺序）
+NOTIFY_PROVIDERS = {"wecom": "企业微信", "dingtalk": "钉钉", "discord": "Discord"}
+NOTIFY_PROVIDER_KEYS = list(NOTIFY_PROVIDERS)
+NOTIFY_PROVIDER_LABELS = ("企业微信机器人", "钉钉机器人", "Discord Webhook")
 import adb_controller as adb_mod
 from tkinter import filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
@@ -770,6 +775,11 @@ class Application(ttkb.Window):
         self.var_no_takeoff_switch_interval = tk.StringVar(value=str(self.config.get("no_takeoff_switch_interval", 15)))
         self.var_no_takeoff_auto_logout_interval = tk.StringVar(value=str(self.config.get("no_takeoff_auto_logout_interval", 30)))
         self.var_standalone_logout_interval = tk.StringVar(value=str(legacy_logout_interval or 30))
+        self.var_airport_rotation = tk.BooleanVar(value=bool(self.config.get("airport_rotation_enabled", False)))
+        self.var_airport_rotation_count = tk.StringVar(value=str(self.config.get("airport_rotation_count", 2)))
+        self.var_airport_rotation_interval = tk.StringVar(value=str(self.config.get("airport_rotation_interval", 60)))
+        self.var_stand_upgrade = tk.BooleanVar(value=bool(self.config.get("stand_upgrade_enabled", False)))
+        self.var_stand_upgrade_interval = tk.StringVar(value=str(self.config.get("stand_upgrade_interval", 30)))
         self.var_cancel_stand_filter = tk.BooleanVar(value=self.config.get("cancel_stand_filter", True))
         self.var_tower_open_stand_only = tk.BooleanVar(value=self.config.get("tower_open_stand_only", False))
         self.var_2d_mode = tk.BooleanVar(value=self.config.get("2d_mode", True))
@@ -1325,20 +1335,25 @@ class Application(ttkb.Window):
         # Step 1: 顶层窗口将原始按键映射为虚拟事件
         # 注意：用 self.bind（顶层），不用 bind_all。
         # 这样控件级 handler 可通过 return "break" 阻止虚拟事件生成。
+        self.bind('<Command-a>', lambda e: self.event_generate('<<SelectAll>>'))
+        self.bind('<Control-a>', lambda e: self.event_generate('<<SelectAll>>'))
+        self.bind_all('<<SelectAll>>', _clipboard_select_all)
+
+        # 复制/粘贴/剪切只在 macOS 兜底：Windows/Linux 上 Tk 的 Entry/Text 自带
+        # Ctrl+C/V/X，再叠加这里的处理会让一次 Ctrl+V 粘贴 2~3 次。
+        if not IS_MAC:
+            return
         self.bind('<Command-c>', lambda e: self.event_generate('<<Copy>>'))
         self.bind('<Control-c>', lambda e: self.event_generate('<<Copy>>'))
         self.bind('<Command-v>', lambda e: self.event_generate('<<Paste>>'))
         self.bind('<Control-v>', lambda e: self.event_generate('<<Paste>>'))
         self.bind('<Command-x>', lambda e: self.event_generate('<<Cut>>'))
         self.bind('<Control-x>', lambda e: self.event_generate('<<Cut>>'))
-        self.bind('<Command-a>', lambda e: self.event_generate('<<SelectAll>>'))
-        self.bind('<Control-a>', lambda e: self.event_generate('<<SelectAll>>'))
 
         # Step 2: bind_all 处理虚拟事件，执行实际剪贴板操作
         self.bind_all('<<Copy>>', _clipboard_copy)
         self.bind_all('<<Paste>>', _clipboard_paste)
         self.bind_all('<<Cut>>', _clipboard_cut)
-        self.bind_all('<<SelectAll>>', _clipboard_select_all)
 
     def load_config(self):
         if os.path.exists(CONFIG_FILE):
@@ -1451,6 +1466,24 @@ class Application(ttkb.Window):
             self.config["standalone_logout_interval"] = max(1.0, min(120.0, float(self.var_standalone_logout_interval.get())))
         except Exception:
             self.config["standalone_logout_interval"] = 30.0
+        self.config["airport_rotation_enabled"] = bool(self.var_airport_rotation.get())
+        try:
+            self.config["airport_rotation_count"] = max(2, min(6, int(self.var_airport_rotation_count.get())))
+        except Exception:
+            self.config["airport_rotation_count"] = 2
+        try:
+            self.config["airport_rotation_interval"] = max(5.0, min(1440.0, float(self.var_airport_rotation_interval.get())))
+        except Exception:
+            self.config["airport_rotation_interval"] = 60.0
+        self.config["stand_upgrade_enabled"] = bool(self.var_stand_upgrade.get())
+        try:
+            self.config["stand_upgrade_interval"] = max(5.0, min(240.0, float(self.var_stand_upgrade_interval.get())))
+        except Exception:
+            self.config["stand_upgrade_interval"] = 30.0
+        # 运行中的脚本记着当前在第几个机场，落盘以便下次启动接着轮换
+        _bot = getattr(self, "bot", None)
+        if _bot is not None and hasattr(_bot, "_airport_rotation_index"):
+            self.config["airport_rotation_index"] = int(_bot._airport_rotation_index)
         self.config["category_processing_enabled"] = bool(self.var_category_processing.get())
         cat_sel = {c["key"]: bool(self.var_category_selection[c["key"]].get()) for c in SIDEBAR_CATEGORIES}
         self.config["category_selection"] = cat_sel
@@ -1469,7 +1502,7 @@ class Application(ttkb.Window):
         self.config["anti_stuck_threshold"] = anti_stuck_threshold
         self.config["mobile_notify_enabled"] = bool(self.var_notify_enabled.get())
         provider = str(self.var_notify_provider.get() or "wecom").strip().lower()
-        if provider not in ("wecom", "dingtalk"):
+        if provider not in NOTIFY_PROVIDERS:
             provider = "wecom"
         self.var_notify_provider.set(provider)
         self.config["mobile_notify_provider"] = provider
@@ -1694,8 +1727,9 @@ class Application(ttkb.Window):
         return AdbController.scan_devices(debug=debug)
 
     def _build_mobile_notify_payload(self, provider, content):
-        # 企业微信与钉钉机器人都支持 text 消息，统一构造，减少小白配置复杂度。
-        _ = provider
+        # 企业微信与钉钉机器人都支持 text 消息；Discord Webhook 用 content 字段（上限 2000 字）。
+        if provider == "discord":
+            return {"username": "WOA AutoBot", "content": content[:1990]}
         return {
             "msgtype": "text",
             "text": {
@@ -1726,7 +1760,7 @@ class Application(ttkb.Window):
             return
 
         provider = snap.get("provider") or "wecom"
-        if provider not in ("wecom", "dingtalk"):
+        if provider not in NOTIFY_PROVIDERS:
             provider = "wecom"
         webhook = snap.get("webhook") or ""
         if not webhook:
@@ -1745,7 +1779,7 @@ class Application(ttkb.Window):
             self._notify_last_signature = signature
 
         keyword = snap.get("keyword") or ""
-        provider_name = "企业微信" if provider == "wecom" else "钉钉"
+        provider_name = NOTIFY_PROVIDERS[provider]
         device = snap.get("device") or "未选择"
 
         content = (
@@ -1772,7 +1806,9 @@ class Application(ttkb.Window):
                 req = urllib.request.Request(
                     webhook,
                     data=data,
-                    headers={"Content-Type": "application/json; charset=utf-8"},
+                    headers={"Content-Type": "application/json; charset=utf-8",
+                             # Discord 会拒绝 Python 默认 UA（403），统一带上程序名
+                             "User-Agent": "WOA-AutoBot (webhook notifier)"},
                     method="POST",
                 )
                 with urllib.request.urlopen(req, timeout=6, **ctx_kwargs) as resp:
@@ -3658,7 +3694,7 @@ class Application(ttkb.Window):
         ttkb.Label(tab_notify_left, text="一键接入手机提醒", font=("bold")).pack(anchor="w")
         ttkb.Label(
             tab_notify_left,
-            text="脚本出现报错时，自动把提醒推送到企业微信或钉钉机器人。",
+            text="脚本出现报错时，自动把提醒推送到企业微信、钉钉机器人或 Discord。",
             bootstyle="secondary",
         ).pack(anchor="w", pady=(4, 10))
 
@@ -3680,15 +3716,13 @@ class Application(ttkb.Window):
         ttkb.Label(f_notify_provider, text="提醒平台:").pack(side=LEFT)
         provider_combo = ttkb.Combobox(
             f_notify_provider,
-            values=("企业微信机器人", "钉钉机器人"),
+            values=NOTIFY_PROVIDER_LABELS,
             state="readonly",
             width=16,
         )
         provider_combo.pack(side=LEFT, padx=8)
-        if self.var_notify_provider.get().strip().lower() == "dingtalk":
-            provider_combo.current(1)
-        else:
-            provider_combo.current(0)
+        _cur_provider = self.var_notify_provider.get().strip().lower()
+        provider_combo.current(NOTIFY_PROVIDER_KEYS.index(_cur_provider) if _cur_provider in NOTIFY_PROVIDER_KEYS else 0)
 
         f_notify_webhook = ttkb.Frame(tab_notify_left)
         f_notify_webhook.pack(fill=X, pady=5)
@@ -3707,7 +3741,7 @@ class Application(ttkb.Window):
         ).pack(side=LEFT, padx=5)
 
         def test_mobile_notify():
-            provider = "dingtalk" if provider_combo.current() == 1 else "wecom"
+            provider = NOTIFY_PROVIDER_KEYS[max(0, provider_combo.current())]
             self.var_notify_provider.set(provider)
             self.var_notify_webhook.set(e_notify_webhook.get().strip())
             self.var_notify_keyword.set(e_notify_keyword.get().strip())
@@ -3770,7 +3804,8 @@ class Application(ttkb.Window):
 
         ttkb.Label(tab_notify_right, text="小白接入指引", font=("bold")).pack(anchor="w")
         guide_lines = [
-            "1. 在企业微信/钉钉群里添加自定义机器人，复制 Webhook 地址。",
+            "1. 在企业微信/钉钉群里添加自定义机器人，复制 Webhook 地址；\n"
+            "   Discord：频道设置 → 整合 → Webhook → 新 Webhook → 复制 Webhook 网址。",
             "2. 选择提醒平台并粘贴 Webhook，必要时填写关键词。",
             "3. 点击“发送测试提醒”，手机收到消息后再点保存设置。",
             "4. 后续脚本报错会自动推送，避免人不在电脑旁时漏看。",
@@ -4186,6 +4221,58 @@ class Application(ttkb.Window):
         self.create_info_icon(f_logout,
                               "独立小退采用固定间隔，不再使用随机范围。\n单位：分钟，范围 1-120。\n点击确定后生效。").pack(side=LEFT, padx=5)
 
+        f_rotate = ttkb.Frame(tab_runtime_left)
+        f_rotate.pack(fill=X, pady=5)
+        ttkb.Checkbutton(f_rotate, text="自动轮换机场", variable=self.var_airport_rotation,
+                         command=lambda: self._toggle_functional_switch("自动轮换机场", self.var_airport_rotation),
+                         bootstyle="success-round-toggle").pack(side=LEFT)
+        ttkb.Label(f_rotate, text="间隔(分钟):").pack(side=LEFT, padx=(10, 0))
+        e_rotate_interval = ttkb.Entry(f_rotate, textvariable=self.var_airport_rotation_interval, width=5)
+        e_rotate_interval.pack(side=LEFT, padx=5)
+
+        def apply_airport_rotation():
+            try:
+                interval = max(5.0, min(1440.0, float(e_rotate_interval.get().strip())))
+            except ValueError:
+                messagebox.showerror("错误", "间隔须为数字（5-1440 分钟）", parent=win)
+                return
+            self.var_airport_rotation_interval.set(f"{interval:g}")
+            self.save_config()
+            self.sync_all_configs_to_bot(from_advanced_save=True)
+            print(f">>> [轮换机场] {'开启' if self.var_airport_rotation.get() else '关闭'}，间隔 {interval:g} 分钟")
+
+        ttkb.Button(f_rotate, text="确定", bootstyle="success-outline", command=apply_airport_rotation, width=8).pack(side=LEFT, padx=(8, 0))
+        self.create_info_icon(f_rotate,
+                              "按间隔自动切到下一个机场，例如 2 个机场时 A→B→A，不需要开启小退。\n"
+                              "机场数量每次在选择页自动识别，解锁新机场后会自动加入轮换。\n"
+                              "切换后会顺延小退计时，避免刚换完机场又马上小退。").pack(side=LEFT, padx=5)
+
+        f_stand_up = ttkb.Frame(tab_runtime_left)
+        f_stand_up.pack(fill=X, pady=5)
+        ttkb.Checkbutton(f_stand_up, text="自动升级机位", variable=self.var_stand_upgrade,
+                         command=lambda: self._toggle_functional_switch("自动升级机位", self.var_stand_upgrade),
+                         bootstyle="success-round-toggle").pack(side=LEFT)
+        ttkb.Label(f_stand_up, text="间隔(分钟):").pack(side=LEFT, padx=(10, 0))
+        e_stand_up = ttkb.Entry(f_stand_up, textvariable=self.var_stand_upgrade_interval, width=5)
+        e_stand_up.pack(side=LEFT, padx=5)
+
+        def apply_stand_upgrade():
+            try:
+                iv = max(5.0, min(240.0, float(e_stand_up.get().strip())))
+            except ValueError:
+                messagebox.showerror("错误", "升级间隔必须为数字（5-240 分钟）", parent=win)
+                return
+            self.var_stand_upgrade_interval.set(f"{iv:g}")
+            self.save_config()
+            self.sync_all_configs_to_bot(from_advanced_save=True)
+            print(f">>> [机位升级] {'开启' if self.var_stand_upgrade.get() else '关闭'}，间隔 {iv:g} 分钟")
+
+        ttkb.Button(f_stand_up, text="确定", bootstyle="success-outline", command=apply_stand_upgrade, width=8).pack(side=LEFT, padx=(8, 0))
+        self.create_info_icon(f_stand_up,
+                              "按间隔进入「建造」，逐个点击机位，用绿币买到可用的最高等级\n"
+                              "（未建造的机位也会建造）。买不起最高级时会退一级再试。\n"
+                              "机位上有飞机或绿币不足时自动跳过。开启后约 1 分钟执行第一轮。").pack(side=LEFT, padx=5)
+
         ttkb.Separator(tab_runtime_right).pack(fill=X, pady=10)
         ttkb.Label(tab_runtime_right, text="防检测设置", font=("bold")).pack(anchor="w")
 
@@ -4325,7 +4412,7 @@ class Application(ttkb.Window):
             except (TypeError, ValueError):
                 error_window = 5
             self.config["error_restart_window_min"] = max(1, min(60, error_window))
-            notify_provider = "dingtalk" if provider_combo.current() == 1 else "wecom"
+            notify_provider = NOTIFY_PROVIDER_KEYS[max(0, provider_combo.current())]
             notify_webhook = e_notify_webhook.get().strip()
             notify_keyword = e_notify_keyword.get().strip()
             stats_report_enabled = bool(self.var_stats_report_enabled.get())
@@ -4417,7 +4504,7 @@ class Application(ttkb.Window):
             if old_cfg.get("mobile_notify_enabled") != self.config.get("mobile_notify_enabled"):
                 changed.append(("手机报错提醒", "开" if self.config.get("mobile_notify_enabled") else "关"))
             if old_cfg.get("mobile_notify_provider") != self.config.get("mobile_notify_provider"):
-                changed.append(("提醒平台", "企业微信" if self.config.get("mobile_notify_provider") == "wecom" else "钉钉"))
+                changed.append(("提醒平台", NOTIFY_PROVIDERS.get(self.config.get("mobile_notify_provider"), "企业微信")))
             if old_cfg.get("mobile_stats_report_enabled") != self.config.get("mobile_stats_report_enabled"):
                 changed.append(("定时统计汇报", "开" if self.config.get("mobile_stats_report_enabled") else "关"))
             if old_cfg.get("mobile_stats_report_hours") != self.config.get("mobile_stats_report_hours"):
@@ -4716,6 +4803,10 @@ class Application(ttkb.Window):
     def stop_bot(self):
         bot = self.bot
         if bot:
+            try:
+                self.save_config()   # 记下当前轮换到第几个机场
+            except Exception:
+                pass
             bot.running = False
             bot.stop()
         self._stats_report_anchor_ts = 0.0
@@ -4849,6 +4940,12 @@ class Application(ttkb.Window):
             self.bot.set_no_takeoff_auto_logout_interval(self.config.get("no_takeoff_auto_logout_interval", 30))
             self.bot.set_standalone_logout_interval(self.config.get("standalone_logout_interval", 30))
             self.bot.set_standalone_logout_enabled(self.config.get("no_takeoff_logout_enabled", False))
+            self.bot.set_airport_rotation_count(self.config.get("airport_rotation_count", 2))
+            self.bot.set_airport_rotation_index(self.config.get("airport_rotation_index", 0))
+            self.bot.set_airport_rotation_interval(self.config.get("airport_rotation_interval", 60))
+            self.bot.set_airport_rotation_enabled(self.config.get("airport_rotation_enabled", False))
+            self.bot.set_stand_upgrade_interval(self.config.get("stand_upgrade_interval", 30))
+            self.bot.set_stand_upgrade_enabled(self.config.get("stand_upgrade_enabled", False))
             self.bot.set_cancel_stand_filter_when_tower_off(self.var_cancel_stand_filter.get())
             self.bot.set_filter_stand_only_when_tower_open(self.var_tower_open_stand_only.get())
             self.bot.set_2d_mode(self.var_2d_mode.get())

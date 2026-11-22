@@ -517,6 +517,16 @@ class WoaBot:
         self._no_takeoff_auto_logout_next_time = 0.0
         self._standalone_logout_interval = 30.0
         self._standalone_logout_next_time = 0.0
+        # 自动轮换机场（独立计时，不依赖小退）：机场选择页右侧列表中，已拥有的机场排在最前面
+        self.enable_airport_rotation = False
+        self._airport_rotation_interval = 60.0   # 分钟
+        self._airport_rotation_next_time = 0.0
+        self._airport_rotation_count = 2
+        self._airport_rotation_index = 0   # 当前所在机场在列表中的序号（0 起）
+        # 自动升级机位：定时进「建造」逐个点机位，买到最高可用等级
+        self.enable_stand_upgrade = False
+        self._stand_upgrade_interval = 30.0   # 分钟
+        self._stand_upgrade_next_time = 0.0
         # 不起飞策略稳定性保护
         self._no_takeoff_last_strategy = 'stand_only'
         self._no_takeoff_strategy_stable_count = 0
@@ -693,6 +703,67 @@ class WoaBot:
         self.log(f">>> [配置] 独立小退间隔: {interval:g} 分钟")
         if self.enable_standalone_logout:
             self._schedule_standalone_logout()
+
+    def set_airport_rotation_enabled(self, enabled):
+        enabled = bool(enabled)
+        if self.enable_airport_rotation == enabled:
+            return
+        self.enable_airport_rotation = enabled
+        self.log(f">>> [配置] 自动轮换机场: {'已开启' if enabled else '已关闭'}")
+        self._airport_rotation_next_time = (
+            time.time() + self._airport_rotation_interval * 60.0 if enabled else 0.0)
+
+    def set_airport_rotation_interval(self, minutes):
+        try:
+            interval = float(minutes)
+        except (TypeError, ValueError):
+            interval = 60.0
+        interval = max(5.0, min(1440.0, interval))
+        if self._airport_rotation_interval == interval:
+            return
+        self._airport_rotation_interval = interval
+        self.log(f">>> [配置] 轮换机场间隔: {interval:g} 分钟")
+        if self.enable_airport_rotation:
+            self._airport_rotation_next_time = time.time() + interval * 60.0
+
+    def set_airport_rotation_count(self, count):
+        try:
+            count = int(count)
+        except (TypeError, ValueError):
+            count = 2
+        count = max(2, min(self.AIRPORT_CARD_MAX, count))
+        if self._airport_rotation_count == count:
+            return
+        self._airport_rotation_count = count
+        self._airport_rotation_index %= count
+        self.log(f">>> [配置] 轮换机场数量: {count}")
+
+    def set_stand_upgrade_enabled(self, enabled):
+        enabled = bool(enabled)
+        if self.enable_stand_upgrade == enabled:
+            return
+        self.enable_stand_upgrade = enabled
+        self.log(f">>> [配置] 自动升级机位: {'已开启' if enabled else '已关闭'}")
+        # 开启后约 1 分钟先跑一轮，之后按间隔
+        self._stand_upgrade_next_time = time.time() + 60.0 if enabled else 0.0
+
+    def set_stand_upgrade_interval(self, minutes):
+        try:
+            interval = float(minutes)
+        except (TypeError, ValueError):
+            interval = 30.0
+        interval = max(5.0, min(240.0, interval))
+        if self._stand_upgrade_interval == interval:
+            return
+        self._stand_upgrade_interval = interval
+        self.log(f">>> [配置] 自动升级机位间隔: {interval:g} 分钟")
+
+    def set_airport_rotation_index(self, index):
+        try:
+            index = int(index)
+        except (TypeError, ValueError):
+            index = 0
+        self._airport_rotation_index = index % max(1, self._airport_rotation_count)
 
     def set_cancel_stand_filter_when_tower_off(self, enabled):
         if self.enable_cancel_stand_filter == enabled:
@@ -1098,28 +1169,39 @@ class WoaBot:
         self._no_takeoff_cycle_next_switch_time = time.time() + self._no_takeoff_switch_interval
         self.log(f"📋 [不起飞] {reason}，{old} → {self._no_takeoff_cycle_side}")
 
-    def _do_no_takeoff_small_logout(self):
+    def _do_no_takeoff_small_logout(self, switch_airport=False):
         """不起飞模式小退：换机场 → 重进游戏 → 恢复处理。
+        switch_airport=True 时在机场选择页先选下一个机场（自动轮换机场复用此流程）。
         流程：点击主界面 → 换机场 → 等待 → 点击开始 → 等待主界面 → 重检测塔台/筛选。"""
         self._check_running()
         loc = self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.8)
         if not loc:
             self.log("📋 [小退] 未找到主界面按钮，跳过")
-            return
+            return False
+        if switch_airport:
+            # 记下左上角当前机场的国旗与代码，到选择页里找出对应卡片，以确定「当前」是第几个
+            self._airport_tag = self._crop_airport_tag(self.adb.get_screenshot())
         self.adb.click(loc[0], loc[1], random_offset=8)
-        self.sleep(0.6)
-        # 重试查找更改机场按钮（等待界面过渡完成）
+        self.sleep(1.0)
+        # 重试查找换机场按钮（等待界面过渡完成）。
+        # 游戏 3.8 起按钮文字由「更改机场」改为「切换机场」，两种模板都试。
         found_airport = False
-        for _ in range(5):
+        for _ in range(8):
             self._check_running()
-            if self.find_and_click('change_airport.png', confidence=0.75, wait=0):
+            if (self.find_and_click('change_airport_2.png', confidence=0.8, wait=0) or
+                    self.find_and_click('change_airport.png', confidence=0.75, wait=0)):
                 found_airport = True
                 break
-            self.sleep(0.25)
+            self.sleep(0.3)
         if not found_airport:
-            self.log("📋 [小退] 未找到更改机场按钮，跳过")
-            return
+            self.log("📋 [小退] 未找到切换机场按钮，跳过")
+            # 菜单可能已打开：点对话框外侧关闭，避免停在菜单里
+            self.adb.click(*self.MENU_DISMISS_PT, random_offset=10)
+            self.sleep(0.8)
+            return False
         self.sleep(4.0)
+        if switch_airport:
+            self._select_next_airport()
         # 等待 first_start_2 按钮（最多30s）
         t0 = time.time()
         while time.time() - t0 < 30.0:
@@ -1142,9 +1224,298 @@ class WoaBot:
                 except Exception as e:
                     self.log(f"🗼 [塔台] ⚠️ 小退后重检测失败: {e}")
                 self._periodic_15s_check(force_initial_filter_check=True)
-                return
+                return True
             self.sleep(0.6)
         self.log("📋 [小退] 90s 内未检测到主界面，由后续流程处理")
+        return True   # 已进入换机场流程，不重试
+
+    MENU_DISMISS_PT = (160, 720)   # 主菜单对话框外侧，点击可关闭菜单
+
+    # 机场选择页右侧卡片（逻辑坐标 1600x900）：第 k 张卡片中心 = (X, Y0 + k*STEP)
+    AIRPORT_CARD_X = 1412
+    AIRPORT_CARD_Y0 = 74
+    AIRPORT_CARD_STEP = 121
+    AIRPORT_CARD_MAX = 7   # 不滚动列表时能完整点到的卡片数
+
+    def _count_owned_airports(self, screen):
+        """数机场选择页右侧列表里已拥有的机场：已拥有的排在最前，
+        第一张带「🔒 已锁定」的卡片之前的数量即为拥有数。识别失败返回 None。"""
+        if screen is None:
+            return None
+        tpl_path = self.icon_path + 'airport_locked.png'
+        tpl = self.adb._template_cache.get(tpl_path)
+        if tpl is None:
+            tpl = self.adb._read_image_safe(tpl_path)
+            if tpl is None:
+                return None
+            self.adb._cache_template(tpl_path, tpl)
+        for k in range(self.AIRPORT_CARD_MAX):
+            cy = self.AIRPORT_CARD_Y0 + k * self.AIRPORT_CARD_STEP
+            roi = screen[cy + 10:cy + 60, 1300:1380]
+            if roi.shape[0] < tpl.shape[0] or roi.shape[1] < tpl.shape[1]:
+                break
+            if cv2.minMaxLoc(cv2.matchTemplate(roi, tpl, cv2.TM_CCOEFF_NORMED))[1] >= 0.8:
+                return k
+        return self.AIRPORT_CARD_MAX   # 可见范围内都没有锁 = 都已拥有
+
+    # 主界面左上角：国旗 / 机场代码（逻辑坐标，y0, y1, x0, x1）
+    AIRPORT_TAG_FLAG = (28, 52, 130, 156)
+    AIRPORT_TAG_TEXT = (26, 54, 156, 196)
+
+    def _crop_airport_tag(self, screen):
+        if screen is None:
+            return None
+        fy0, fy1, fx0, fx1 = self.AIRPORT_TAG_FLAG
+        ty0, ty1, tx0, tx1 = self.AIRPORT_TAG_TEXT
+        return screen[fy0:fy1, fx0:fx1].copy(), screen[ty0:ty1, tx0:tx1].copy()
+
+    def _identify_current_airport_card(self, screen, owned):
+        """在机场选择页里找出与进入前左上角国旗+代码最像的卡片序号；不确定时返回 None。
+        选择页列表顺序可能随当前机场变化，所以不能只靠记住的序号。"""
+        tag = getattr(self, '_airport_tag', None)
+        if tag is None or screen is None:
+            return None
+        scores = []
+        for k in range(owned):
+            cy = self.AIRPORT_CARD_Y0 + k * self.AIRPORT_CARD_STEP
+            roi = screen[max(0, cy - 60):cy, 1290:1440]
+            total = 0.0
+            for part in tag:
+                best = 0.0
+                for sc in (0.9, 0.95, 1.0, 1.05, 1.1):
+                    t = cv2.resize(part, None, fx=sc, fy=sc)
+                    if t.shape[0] > roi.shape[0] or t.shape[1] > roi.shape[1]:
+                        continue
+                    best = max(best, cv2.minMaxLoc(cv2.matchTemplate(roi, t, cv2.TM_CCOEFF_NORMED))[1])
+                total += best
+            scores.append(total)
+        if not scores:
+            return None
+        order = sorted(range(len(scores)), key=lambda i: -scores[i])
+        best = order[0]
+        second = scores[order[1]] if len(order) > 1 else 0.0
+        if scores[best] >= 1.4 and scores[best] - second >= 0.2:
+            return best
+        return None
+
+    def _select_next_airport(self):
+        """在机场选择页点击下一个机场卡片，之后由调用方点击「开始」进场。
+        机场数量每次现场识别，解锁新机场后自动纳入轮换，无需改设置。"""
+        self._check_running()
+        # 等选择页加载完：出现「已锁定」卡片才算加载好（最多再等 10s）
+        owned, screen = None, None
+        t0 = time.time()
+        while time.time() - t0 < 10.0:
+            screen = self.adb.get_screenshot()
+            n = self._count_owned_airports(screen)
+            if n is not None and n < self.AIRPORT_CARD_MAX:
+                owned = n
+                break
+            self.sleep(0.8)
+        if owned is None:
+            owned = self._airport_rotation_count
+            self.log(f"✈️ [轮换机场] 未能识别机场数量，按 {owned} 个处理")
+        elif owned != self._airport_rotation_count:
+            self.log(f"✈️ [轮换机场] 识别到已拥有 {owned} 个机场")
+            self._airport_rotation_count = max(1, owned)
+        if owned < 2:
+            self.log("✈️ [轮换机场] 只有 1 个机场，重进当前机场")
+            self.adb.click(self.AIRPORT_CARD_X, self.AIRPORT_CARD_Y0, random_offset=6)
+            self._airport_rotation_index = 0
+            self.sleep(1.5)
+            return
+        cur = self._identify_current_airport_card(screen, owned)
+        if cur is None:
+            cur = self._airport_rotation_index % owned
+            self.log(f"✈️ [轮换机场] 未能确认当前机场，按记录视为第 {cur + 1} 个")
+        nxt = (cur + 1) % owned
+        y = self.AIRPORT_CARD_Y0 + nxt * self.AIRPORT_CARD_STEP
+        self.log(f"✈️ [轮换机场] 当前第 {cur + 1} 个 → 切到第 {nxt + 1} 个机场（共 {owned} 个）")
+        self.adb.click(self.AIRPORT_CARD_X, y, random_offset=6)
+        self._airport_rotation_index = nxt
+        self.sleep(1.5)
+
+    # ─── 自动升级机位 ─────────────────────────────────────
+    # 以下坐标/颜色均为 1600x900 逻辑分辨率下，在「建造」模式机位面板中实测所得
+    STAND_LETTER_XS = (446, 502, 558, 616, 673, 729, 786)   # 机位等级筛选 A..G
+    STAND_LETTER_Y = 819
+    STAND_BUY_PT = (194, 817)          # 「购买」按钮（需长按约 1.5s，无确认弹窗）
+    STAND_PICKER_TOGGLE = (362, 649)   # 面板右侧的等级筛选开关按钮
+    STAND_EXIT_PT = (58, 53)           # 左上角返回
+    STAND_COLORS = {                   # BGR
+        'owned': (153, 220, 96),       # 已拥有（绿）
+        'avail': (203, 191, 179),      # 可购买（白）
+        'sel': (239, 174, 53),         # 当前选中（蓝）
+        'locked': (125, 112, 99),      # 未解锁（灰）
+    }
+    STAND_BUY_BRIGHT = (0, 187, 233)   # 购买可点（亮黄）；暗黄 = 机位已占用 / 绿币不足
+    STAND_TOGGLE_COLOR = (233, 222, 211)
+
+    @staticmethod
+    def _color_close(px, ref, tol=40):
+        return all(abs(int(a) - int(b)) <= tol for a, b in zip(px, ref))
+
+    def _find_stand_pins(self, screen):
+        """在建造模式截图里找机位图钉：图钉本体灰度≈48（深色地块是 52、地面 102），
+        中间带亮色编号标签。返回逻辑坐标列表。"""
+        import numpy as np
+        g = cv2.cvtColor(screen, cv2.COLOR_BGR2GRAY)
+        body = ((g >= 46) & (g <= 50)).astype(np.uint8)
+        body[:75, :] = 0
+        body[:, 1480:] = 0
+        n, _lab, st, cen = cv2.connectedComponentsWithStats(body)
+        cands = []
+        for i in range(1, n):
+            x, y, w, h, a = st[i]
+            if not (6 <= a <= 110 and 3 <= w <= 13 and 3 <= h <= 16):
+                continue
+            win = g[max(0, y - 5):y + h, x:x + w]
+            nb = int((win >= 120).sum())
+            if 2 <= nb <= 30:
+                cands.append((int(round(cen[i][0])), int(round(cen[i][1])) - 2, int(a)))
+        pins = []
+        for p in sorted(cands, key=lambda p: -p[2]):
+            if all(abs(p[0] - q[0]) > 8 or abs(p[1] - q[1]) > 10 for q in pins):
+                pins.append(p)
+        return sorted(((x, y) for x, y, _ in pins), key=lambda p: (p[0], p[1]))
+
+    def _stand_letter_states(self, screen):
+        out = []
+        for x in self.STAND_LETTER_XS:
+            px = screen[self.STAND_LETTER_Y, x - 15]
+            state = None
+            for name, ref in self.STAND_COLORS.items():
+                if self._color_close(px, ref, 30):
+                    state = name
+                    break
+            out.append(state)
+        return out
+
+    @staticmethod
+    def _in_rect(pt, rect):
+        x0, y0, x1, y1 = rect
+        return x0 <= pt[0] <= x1 and y0 <= pt[1] <= y1
+
+    def _do_stand_upgrade_round(self):
+        """进入建造模式，逐个点机位，把每个机位买到能买的最高等级。
+        机位上有飞机、绿币不够时「购买」是暗的，直接跳过。"""
+        self._check_running()
+        screen = self.adb.get_screenshot()
+        if screen is None or not self._locate_on_screen('main_interface.png', screen, confidence=0.8,
+                                                         region=self.REGION_MAIN_ANCHOR):
+            self.log("🏗️ [机位升级] 不在主界面，2 分钟后重试")
+            return False
+        need = getattr(self, '_stand_min_unaffordable', None)
+        coins = self._read_green_coins(screen)
+        if need and coins is not None and coins < need:
+            self.log(f"🏗️ [机位升级] 绿币 {coins} < 上次最便宜未买起的 {need}，本轮跳过")
+            return True
+        # 机位图钉识别只在 2D 视角下可靠（3D 下图钉大小随透视变化），先强制切 2D
+        want_2d = self.enable_2d_mode
+        self.enable_2d_mode = True
+        try:
+            if self._ensure_view_mode(screen):
+                self.sleep(2.0)
+                screen = self.adb.get_screenshot()
+        finally:
+            self.enable_2d_mode = want_2d
+        crane = None
+        for attempt in range(3):
+            crane = self._locate_on_screen('main_dock_crane.png', screen, confidence=0.8,
+                                           region=self.ROUTE_DOCK_ROI) if screen is not None else None
+            if crane:
+                break
+            # 底部栏被航班详情等窗口挡住（左上菜单按钮仍可见）：先关窗口再找
+            self.close_window()
+            self.sleep(1.0)
+            screen = self.adb.get_screenshot()
+        if not crane:
+            self.log("🏗️ [机位升级] 未找到「建造」按钮（可能有窗口未关闭），2 分钟后重试")
+            return False
+        self.adb.click(crane[0], crane[1], random_offset=4)
+        self.sleep(2.0)
+        try:
+            self._do_stand_upgrade_in_build_mode()
+        finally:
+            if not want_2d:
+                self._ensure_view_mode()   # 用户原本用 3D，升级完切回去
+        return True
+
+    def _do_stand_upgrade_in_build_mode(self):
+        self._check_running()
+        screen = self.adb.get_screenshot()
+        pins = self._find_stand_pins(screen) if screen is not None else []
+        if not pins:
+            self.log("🏗️ [机位升级] 建造模式下没有识别到机位，退出")
+            self._exit_build_mode()
+            return
+        self.log(f"🏗️ [机位升级] 识别到 {len(pins)} 个机位，开始逐个检查")
+        panel_rect = (0, 405, 410, 900)     # 左下机位面板（打开后会盖住此区域的图钉）
+        picker_rect = (400, 690, 835, 900)  # 底部等级筛选面板
+        # 被左下面板盖住的图钉放在最前面，趁面板还没打开先处理
+        pins.sort(key=lambda p: (not self._in_rect(p, panel_rect), p[0], p[1]))
+        bought = skipped = 0
+        min_short = None   # 本轮看到的最便宜但买不起的价格
+        for idx, pin in enumerate(pins):
+            self._check_running()
+            if idx > 0 and self._in_rect(pin, panel_rect):
+                skipped += 1
+                continue
+            if self._in_rect(pin, picker_rect):
+                cur = self.adb.get_screenshot()
+                if cur is not None and any(self._stand_letter_states(cur)):
+                    self.adb.click(*self.STAND_PICKER_TOGGLE, random_offset=3)
+                    self.sleep(0.6)
+            self.adb.click(pin[0], pin[1], random_offset=2)
+            self.sleep(1.0)
+            cur = self.adb.get_screenshot()
+            if cur is None or not self._color_close(cur[self.STAND_PICKER_TOGGLE[1], self.STAND_PICKER_TOGGLE[0]],
+                                                     self.STAND_TOGGLE_COLOR):
+                continue  # 没点出机位面板（误识别或被遮挡）
+            states = self._stand_letter_states(cur)
+            if not any(states):
+                self.adb.click(*self.STAND_PICKER_TOGGLE, random_offset=3)
+                self.sleep(0.6)
+                cur = self.adb.get_screenshot()
+                states = self._stand_letter_states(cur) if cur is not None else []
+            avail = [i for i, s in enumerate(states) if s in ('avail', 'sel')]
+            if not avail:
+                continue  # 已经是最高可用等级
+            # 先试最高等级，买不起再往下退一级
+            for li in reversed(avail):
+                self.adb.click(self.STAND_LETTER_XS[li], self.STAND_LETTER_Y, random_offset=3)
+                self.sleep(0.7)
+                cur = self.adb.get_screenshot()
+                if cur is None:
+                    break
+                if self._color_close(cur[self.STAND_BUY_PT[1], self.STAND_BUY_PT[0]], self.STAND_BUY_BRIGHT):
+                    ok, price, coins = self._affordable(cur, 'stand')
+                    if ok is False:
+                        min_short = price if min_short is None else min(min_short, price)
+                        continue   # 买不起这一级，退一级再看
+                    bx, by = self.STAND_BUY_PT
+                    self.adb.swipe(bx, by, bx, by, duration_ms=1500)
+                    self.sleep(1.5)
+                    bought += 1
+                    self.log(f"🏗️ [机位升级] 已购买机位等级 → {'ABCDEFG'[li]}")
+                    break
+        self._stand_min_unaffordable = min_short if (bought == 0 and min_short) else None
+        msg = f"🏗️ [机位升级] 本轮完成：购买 {bought} 次"
+        if min_short:
+            msg += f"，有机位因绿币不足未升级（最便宜 {min_short}）"
+        if skipped:
+            msg += f"，{skipped} 个被面板遮挡的机位留到下一轮"
+        self.log(msg)
+        self._exit_build_mode()
+
+    def _exit_build_mode(self):
+        for _ in range(3):
+            self._check_running()
+            self.adb.click(*self.STAND_EXIT_PT, random_offset=3)
+            self.sleep(1.5)
+            if self.safe_locate('main_interface.png', region=self.REGION_MAIN_ANCHOR, confidence=0.8):
+                return
+        self.log("🏗️ [机位升级] 退出建造模式后未回到主界面，交给防卡死处理")
 
     def _schedule_no_takeoff_auto_logout(self):
         self._no_takeoff_auto_logout_next_time = time.time() + self._no_takeoff_auto_logout_interval * 60.0
@@ -2433,6 +2804,29 @@ class WoaBot:
                         self.log("📋 [小退] 独立小退触发")
                         self._do_no_takeoff_small_logout()
                         self._schedule_standalone_logout()
+                    # 自动轮换机场（独立计时）
+                    if (self.enable_airport_rotation and
+                        self._airport_rotation_next_time > 0 and
+                        now_ts >= self._airport_rotation_next_time):
+                        self._airport_rotation_next_time = now_ts + self._airport_rotation_interval * 60.0
+                        self.log("✈️ [轮换机场] 到达轮换间隔，切换到下一个机场")
+                        if not self._do_no_takeoff_small_logout(switch_airport=True):
+                            # 没进到换机场流程（菜单没打开、正在处理任务窗口等），2 分钟后再试
+                            self._airport_rotation_next_time = now_ts + 120.0
+                            self.log("✈️ [轮换机场] 本次未能切换，2 分钟后重试")
+                        else:
+                            # 刚换过机场等于刚小退过，顺延小退计时，避免紧接着又小退
+                            if self.enable_standalone_logout:
+                                self._schedule_standalone_logout()
+                            if self.enable_no_takeoff_mode:
+                                self._schedule_no_takeoff_auto_logout()
+                    # 自动升级机位
+                    if (self.enable_stand_upgrade and
+                        self._stand_upgrade_next_time > 0 and
+                        now_ts >= self._stand_upgrade_next_time):
+                        self._stand_upgrade_next_time = now_ts + self._stand_upgrade_interval * 60.0
+                        if self._do_stand_upgrade_round() is False:
+                            self._stand_upgrade_next_time = now_ts + 120.0
                     # 塔台倒计时
                     if self._check_tower_countdown():
                         idle_count = 0
@@ -3682,7 +4076,7 @@ class WoaBot:
 
             has_buy = self._locate_on_screen('buy_vehicle.png', screen, confidence=0.78)
             has_confirm = self._locate_on_screen('buy_vehicle_confirm.png', screen, confidence=0.78)
-            if not has_buy and not has_confirm:
+            if not has_buy and not has_confirm and not self._in_vehicle_garage(screen):
                 return True
 
             # 依次尝试返回、取消和右上角关闭，尽量兼容不同弹窗层级。
@@ -3698,7 +4092,140 @@ class WoaBot:
             return False
         still_buy = self._locate_on_screen('buy_vehicle.png', verify_screen, confidence=0.78)
         still_confirm = self._locate_on_screen('buy_vehicle_confirm.png', verify_screen, confidence=0.78)
-        return not (still_buy or still_confirm)
+        return not (still_buy or still_confirm or self._in_vehicle_garage(verify_screen))
+
+    # ─── 绿币余额 / 价格识别 ─────────────────────────────
+    # 顶栏绿币与面板价格同一字体：白字、深色底。按列切出单个数字，再与
+    # icon/digits/coin/0-9.png（由实际截图平均得到的 12x18 字形）做相关比对。
+    _COIN_GW, _COIN_GH = 12, 18
+
+    def _coin_digit_refs(self):
+        refs = getattr(self, '_coin_refs_cache', None)
+        if refs is None:
+            refs = {}
+            for d in '0123456789':
+                img = cv2.imread(os.path.join(self.icon_path, 'digits', 'coin', f'{d}.png'), cv2.IMREAD_GRAYSCALE)
+                if img is not None:
+                    refs[d] = img.astype(np.float32) / 255.0
+            self._coin_refs_cache = refs
+        return refs
+
+    def _read_coin_digits(self, img, min_score=0.4):
+        refs = self._coin_digit_refs()
+        if img is None or img.size == 0 or len(refs) < 10:
+            return None
+        g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+        b = (g > 170).astype(np.uint8)
+        cols = b.sum(axis=0) > 0
+        text, x = '', 0
+        while x < len(cols):
+            if not cols[x]:
+                x += 1
+                continue
+            s = x
+            while x < len(cols) and cols[x]:
+                x += 1
+            sub = b[:, s:x]
+            rows = np.where(sub.any(axis=1))[0]
+            sub = sub[rows[0]:rows[-1] + 1]
+            if sub.shape[0] < 6:
+                continue
+            h, w = sub.shape
+            nw = max(1, min(self._COIN_GW, int(round(w * self._COIN_GH / h))))
+            glyph = np.zeros((self._COIN_GH, self._COIN_GW), np.float32)
+            x0 = (self._COIN_GW - nw) // 2
+            glyph[:, x0:x0 + nw] = cv2.resize(sub.astype(np.float32), (nw, self._COIN_GH),
+                                              interpolation=cv2.INTER_AREA)
+            a = glyph - glyph.mean()
+            best, best_s = None, -2.0
+            for d, r in refs.items():
+                rb = r - r.mean()
+                den = float(np.sqrt((a * a).sum() * (rb * rb).sum())) or 1.0
+                sc = float((a * rb).sum()) / den
+                if sc > best_s:
+                    best, best_s = d, sc
+            if best_s < min_score:
+                return None
+            text += best
+        return int(text) if text else None
+
+    def _read_green_coins(self, screen):
+        """顶栏绿币余额；读不出返回 None。"""
+        if screen is None:
+            return None
+        g = cv2.cvtColor(screen, cv2.COLOR_BGR2GRAY)
+        x = 940
+        while x < 1100 and abs(int(g[22, x]) - 39) <= 6:   # 余额胶囊底色 = 39
+            x += 1
+        if x <= 950:
+            return None
+        return self._read_coin_digits(screen[23:44, 938:x - 2])
+
+    def _read_panel_price(self, screen):
+        """左下面板（机位 / 车库）「购买」按钮上方的价格；读不出返回 None。"""
+        if screen is None:
+            return None
+        sub = screen[765:792, 120:280].astype(int)
+        m = (sub[:, :, 1] > 150) & (sub[:, :, 1] - sub[:, :, 2] > 40)   # 绿币图标
+        xs = np.where(m.any(axis=0))[0]
+        if not len(xs):
+            return None
+        cr = 120 + int(xs.max())
+        return self._read_coin_digits(screen[766:790, cr + 3:cr + 100])
+
+    def _affordable(self, screen, tag):
+        """价格与余额都读得出时才判断；读不出返回 None（交给按钮亮暗兜底）。"""
+        price, coins = self._read_panel_price(screen), self._read_green_coins(screen)
+        if price is None or coins is None:
+            return None, price, coins
+        return coins >= price, price, coins
+
+    # 游戏 3.8 新版车库：左下面板一个大按钮，黄色「购买」→ 点一下变绿色「确认」→ 再点完成购买
+    VEHICLE_BUY_PT = (186, 816)
+    VEHICLE_BUY_YELLOW = (0, 187, 233)
+    VEHICLE_CONFIRM_GREEN = (188, 240, 144)
+
+    def _vehicle_btn_state(self, screen):
+        if screen is None:
+            return None
+        px = screen[self.VEHICLE_BUY_PT[1], self.VEHICLE_BUY_PT[0]]
+        if self._color_close(px, self.VEHICLE_BUY_YELLOW, 30):
+            return 'buy'
+        if self._color_close(px, self.VEHICLE_CONFIRM_GREEN, 30):
+            return 'confirm'
+        return None
+
+    def _in_vehicle_garage(self, screen):
+        """新版车库：左上为返回箭头（无主界面菜单按钮），左下为购买/确认按钮。"""
+        if screen is None or self._vehicle_btn_state(screen) is None:
+            return False
+        if self._locate_on_screen('main_interface.png', screen, confidence=0.8, region=self.REGION_MAIN_ANCHOR):
+            return False
+        return bool(self._locate_on_screen('back.png', screen, confidence=0.8, region=(0, 0, 140, 120)))
+
+    def _buy_vehicle_new_garage(self):
+        """新版车库购买流程，返回 True=已购买 / False=买不了（绿币不足或已达上限）/ None=不在新版车库。"""
+        screen = self.adb.get_screenshot()
+        if not self._in_vehicle_garage(screen):
+            return None
+        ok, price, coins = self._affordable(screen, 'vehicle')
+        if ok is False:
+            # 记住价格：余额涨到这个数之前不再进车库
+            self._vehicle_unaffordable_price = price
+            self.log(f"   -> 💸 绿币不足（余额 {coins} < 价格 {price}），不购买")
+            return False
+        if self._vehicle_btn_state(screen) == 'buy':
+            self.adb.click(*self.VEHICLE_BUY_PT, random_offset=6)
+            self.sleep(0.8)
+            screen = self.adb.get_screenshot()
+        if self._vehicle_btn_state(screen) != 'confirm':
+            return False
+        self.adb.click(*self.VEHICLE_BUY_PT, random_offset=6)
+        self.sleep(1.2)
+        done = self._vehicle_btn_state(self.adb.get_screenshot()) == 'buy'
+        if done:
+            self._vehicle_unaffordable_price = None
+        return done
 
     def handle_vehicle_check_task(self, target_pos=None):
         self.sleep(0.2)
@@ -3711,12 +4238,38 @@ class WoaBot:
         red_warn = batch_hits.get('red_warning')
         if red_warn:
             self._no_operable_count = 0
+            short_price = getattr(self, '_vehicle_unaffordable_price', None)
+            coins_now = self._read_green_coins(screen) if short_price else None
+            if self.enable_vehicle_buy and short_price and coins_now is not None and coins_now < short_price:
+                now = time.time()
+                if now - getattr(self, '_vehicle_short_log_ts', 0) > 300:
+                    self._vehicle_short_log_ts = now
+                    self.log(f"   -> 💸 车辆不足，但绿币 {coins_now} < 上次价格 {short_price}，攒够再买")
+                self.close_window()
+                return False
             if self.enable_vehicle_buy:
                 self.log("   -> 🚨 发现车辆不足，准备购买")
                 self.adb.click(red_warn[0], red_warn[1], random_offset=6)
                 self.sleep(0.5)
                 bought = False
-                if self.wait_and_click('buy_vehicle.png', timeout=2.0, click_wait=1.0):
+                # 先等车库打开，再按新版 / 旧版按钮分别处理
+                new_result = None
+                t_wait = time.time()
+                while time.time() - t_wait < 2.5:
+                    self._check_running()
+                    new_result = self._buy_vehicle_new_garage()
+                    if new_result is not None:
+                        break
+                    if self.safe_locate('buy_vehicle.png', confidence=0.78):
+                        break
+                    self.sleep(0.3)
+                if new_result is True:
+                    self.log("   -> ✅ 购买车辆成功")
+                    bought = True
+                elif new_result is False:
+                    if not getattr(self, '_vehicle_unaffordable_price', None):
+                        self.log("   -> 🛑 购买按钮不可用（绿币不足或该车辆已达上限），本次跳过")
+                elif self.wait_and_click('buy_vehicle.png', timeout=2.0, click_wait=1.0):
                     if self.wait_and_click('buy_vehicle_confirm.png', timeout=3.0, click_wait=0.5):
                         self.log("   -> ✅ 购买确认成功")
                         bought = True
